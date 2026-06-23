@@ -2,11 +2,10 @@
 
 import { createAuthClient } from "better-auth/react";
 import { adminClient } from "better-auth/client/plugins";
-
-const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001/api";
+import { API_URL } from "./api-url";
 
 /** Browser client for the Better Auth API served by the Nest application. */
 export const authClient = createAuthClient({
-  baseURL: `${apiUrl}/auth`,
+  baseURL: `${API_URL}/auth`,
   plugins: [adminClient()],
 });

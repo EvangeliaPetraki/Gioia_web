@@ -4,8 +4,7 @@ import type {
   PolicyDetailDto,
   PolicyListItemDto,
 } from "@gioia/dto";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001/api";
+import { API_URL } from "./api-url";
 
 /** A missing or expired Better Auth session returns the user to sign-in. */
 function handleUnauthorized() {

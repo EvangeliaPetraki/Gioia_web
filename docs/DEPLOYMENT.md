@@ -47,3 +47,7 @@ Use the exact Vercel deployment URL for Railway's `WEB_ORIGIN`. If you use a
 custom frontend domain, update `WEB_ORIGIN` to that domain and redeploy Railway.
 The API sets secure cross-site cookies in production so the Vercel frontend can
 send Better Auth sessions to Railway.
+
+The frontend also accepts the Railway origin without `/api` and adds the prefix
+automatically. It must never use `/auth` by itself: Better Auth is served at
+`https://your-api.up.railway.app/api/auth`.
