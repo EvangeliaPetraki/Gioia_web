@@ -33,6 +33,7 @@ const HIDDEN_COLUMNS: Record<string, string[]> = {
 
 type Row = Record<string, string>;
 
+
 /**
  * Source of truth for the Gioia codebook is the database (Postgres via Prisma).
  * This service persists each analysis into normalised tables and rebuilds the
