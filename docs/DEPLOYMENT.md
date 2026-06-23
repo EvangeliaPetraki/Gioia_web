@@ -1,16 +1,14 @@
 # Deployment
 
-The repository root is the deployment root for both services. The root scripts
-build the shared DTO package first, so either platform can deploy from a clean
-clone without selecting a subdirectory.
+The root scripts build the shared DTO package first, so either platform can
+deploy from a clean clone.
 
 | Service | Platform | Build command | Start command |
 | --- | --- | --- | --- |
 | Frontend | Vercel | `pnpm build:web` | Managed by Vercel/Next.js |
 | API | Railway | `pnpm build:api` | `pnpm start:api` |
 
-`vercel.json` and `railway.toml` contain these commands already. Import the
-repository root in each platform; do not set a Root Directory.
+`apps/web/vercel.json` and `railway.toml` contain these commands already.
 
 ## Railway API
 
@@ -33,8 +31,13 @@ Run `pnpm db:push` once from a trusted environment that has the production
 
 ## Vercel frontend
 
-Import the same repository as a separate Vercel project. Add this environment
-variable for Production, Preview, and Development as appropriate:
+Import the same repository as a separate Vercel project and set **Root
+Directory** to `apps/web`. This is essential: it is where the `package.json`
+that declares Next.js lives. Vercel automatically finds the app-specific
+`vercel.json` there.
+
+Add this environment variable for Production, Preview, and Development as
+appropriate:
 
 ```env
 NEXT_PUBLIC_API_URL=https://your-api.up.railway.app/api
