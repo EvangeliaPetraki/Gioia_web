@@ -19,6 +19,12 @@ export const auth: Auth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL ?? "http://localhost:3001",
   basePath: "/api/auth",
   trustedOrigins: [process.env.WEB_ORIGIN ?? "http://localhost:3000"],
+  // Vercel and Railway use different origins. Production cookies must therefore
+  // be cross-site; localhost retains the safer browser default for development.
+  advanced: {
+    defaultCookieAttributes:
+      process.env.NODE_ENV === "production" ? { sameSite: "none", secure: true } : {},
+  },
   emailAndPassword: {
     enabled: true,
     disableSignUp: true, // no public registration; admins create users
