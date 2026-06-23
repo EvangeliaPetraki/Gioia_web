@@ -1,0 +1,22 @@
+{
+  "name": "web_gioia",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.31.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @gioia/dto run build && pnpm -r --parallel run dev",
+    "build": "pnpm --filter @gioia/dto run build && pnpm -r run build",
+    "start": "pnpm -r --parallel run start",
+    "lint": "pnpm -r run lint",
+    "db:generate": "pnpm --filter @gioia/api run db:generate",
+    "db:push": "pnpm --filter @gioia/api run db:push",
+    "db:migrate": "pnpm --filter @gioia/api run db:migrate",
+    "db:studio": "pnpm --filter @gioia/api run db:studio"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

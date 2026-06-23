@@ -1,0 +1,196 @@
+// Prisma schema. Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Better Auth (email/password + admin plugin) ──────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  image         String?
+  role          String?   @default("user")
+  banned        Boolean?  @default(false)
+  banReason     String?
+  banExpires    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  sessions Session[]
+  accounts Account[]
+
+  @@map("user")
+}
+
+model Session {
+  id             String   @id @default(cuid())
+  expiresAt      DateTime
+  token          String   @unique
+  ipAddress      String?
+  userAgent      String?  @db.Text
+  userId         String
+  impersonatedBy String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  userId                String
+  accessToken           String?   @db.Text
+  refreshToken          String?   @db.Text
+  idToken               String?   @db.Text
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?   @db.Text
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String   @db.Text
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("verification")
+}
+
+// One analysed policy document. Folds the 1:1 sheets (Policy_Metadata,
+// Policy_Summary, Refinement_Summary, Research_Question_Memo) into the parent.
+// `documentId` is the spec's Document_ID (e.g. EU_ECB_01) and the natural key.
+// Child rows carry `orderIndex` to preserve the row order produced by the model
+// so the generated Excel matches what the LLM emitted.
+model AnalyzedDocument {
+  documentId        String   @id
+  policyName        String
+  countryOrRegion   String
+  governanceLevel   String
+  policyYear        String
+  issuingActor      String
+  policyType        String
+  sourceFile        String
+  dateAnalysed      String
+  note              String   @default("") @db.Text
+  policySummary     String   @db.Text
+  refinementSummary String   @db.Text
+  rqFocus           String   @db.Text
+  analyticalMemo    String   @db.Text
+  createdAt         DateTime @default(now())
+
+  rawExcerpts         RawExcerpt[]
+  firstOrderConcepts  FirstOrderConcept[]
+  secondOrderThemes   SecondOrderTheme[]
+  aggregateDimensions AggregateDimension[]
+  gioiaStructureRows  GioiaStructureRow[]
+
+  @@map("analyzed_documents")
+}
+
+model RawExcerpt {
+  id              Int    @id @default(autoincrement())
+  documentId      String
+  orderIndex      Int
+  rawId           String
+  sectionPage     String @db.Text
+  excerptText     String @db.Text
+  initialNotes    String @db.Text
+  analyticalFlags String @db.Text
+
+  document AnalyzedDocument @relation(fields: [documentId], references: [documentId], onDelete: Cascade)
+
+  @@index([documentId])
+  @@map("raw_excerpts")
+}
+
+model FirstOrderConcept {
+  id                Int    @id @default(autoincrement())
+  documentId        String
+  orderIndex        Int
+  conceptInstanceId String
+  conceptId         String
+  rawId             String
+  excerptText       String @db.Text
+  firstOrderConcept String @db.Text
+  codingNotes       String @db.Text
+
+  document AnalyzedDocument @relation(fields: [documentId], references: [documentId], onDelete: Cascade)
+
+  @@index([documentId])
+  @@index([conceptId])
+  @@map("first_order_concepts")
+}
+
+model SecondOrderTheme {
+  id                   Int    @id @default(autoincrement())
+  documentId           String
+  orderIndex           Int
+  themeId              String
+  firstOrderConceptIds String @db.Text
+  firstOrderConcepts   String @db.Text
+  secondOrderTheme     String @db.Text
+  exampleQuote         String @db.Text
+
+  document AnalyzedDocument @relation(fields: [documentId], references: [documentId], onDelete: Cascade)
+
+  @@index([documentId])
+  @@index([themeId])
+  @@map("second_order_themes")
+}
+
+model AggregateDimension {
+  id                Int    @id @default(autoincrement())
+  documentId        String
+  orderIndex        Int
+  aggregateId       String
+  themeIds          String @db.Text
+  secondOrderThemes String @db.Text
+  aggregateDimension String @db.Text
+  description       String @db.Text
+  examplePolicies   String @db.Text
+
+  document AnalyzedDocument @relation(fields: [documentId], references: [documentId], onDelete: Cascade)
+
+  @@index([documentId])
+  @@map("aggregate_dimensions")
+}
+
+model GioiaStructureRow {
+  id                Int    @id @default(autoincrement())
+  documentId        String
+  orderIndex        Int
+  conceptId         String
+  firstOrderConcept String @db.Text
+  themeId           String
+  secondOrderTheme  String @db.Text
+  aggregateId       String
+  aggregateDimension String @db.Text
+
+  document AnalyzedDocument @relation(fields: [documentId], references: [documentId], onDelete: Cascade)
+
+  @@index([documentId])
+  @@map("gioia_structure_rows")
+}
