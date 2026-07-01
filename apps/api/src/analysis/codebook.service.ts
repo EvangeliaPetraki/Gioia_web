@@ -10,7 +10,7 @@ import type {
   PolicyListItemDto,
 } from "@gioia/dto";
 import { PrismaService } from "../prisma/prisma.service";
-import { CODEBOOK_FILENAME, SHEETS } from "./gioia.constants";
+import { CODEBOOK_FILENAME, SHEETS, type ExistingContext } from "./gioia.constants";
 
 /** Result of persisting one document's analysis. */
 export interface AppendResult {
@@ -174,16 +174,17 @@ export class CodebookService implements OnModuleInit {
   }
 
   /**
-   * Compact summary of the existing codebook (document ids + distinct concepts,
-   * themes and dimensions already coded) so the model can reuse/extend codes (Step 7).
+   * The existing codebook's distinct code vocabulary, split by level (document
+   * ids + first-order concepts + second-order themes + aggregate dimensions), so
+   * each pipeline stage can be handed only the level it reuses (Step 7).
    */
-  async getExistingContext(): Promise<string> {
+  async getExistingContext(): Promise<ExistingContext> {
     const docs = await this.prisma.analyzedDocument.findMany({
       select: { documentId: true },
       orderBy: { createdAt: "asc" },
     });
     if (docs.length === 0) {
-      return "The master codebook is currently empty. This is the first policy document; establish the initial code structure.";
+      return { documentIds: [], concepts: [], themes: [], dimensions: [], isEmpty: true };
     }
 
     const [concepts, themes, dimensions] = await Promise.all([
@@ -192,18 +193,13 @@ export class CodebookService implements OnModuleInit {
       this.distinctPairs("aggregateDimension", "aggregateId", "aggregateDimension"),
     ]);
 
-    return [
-      `Documents already coded: ${docs.map((d) => d.documentId).join(", ")}`,
-      "",
-      `Existing first-order concepts (reuse Concept_ID only where wording & meaning match closely):`,
-      concepts.length ? concepts.join("\n") : "(none)",
-      "",
-      `Existing second-order themes (prefer reuse where conceptually overlapping):`,
-      themes.length ? themes.join("\n") : "(none)",
-      "",
-      `Existing aggregate dimensions (keep stable; extend only for genuinely new patterns):`,
-      dimensions.length ? dimensions.join("\n") : "(none)",
-    ].join("\n");
+    return {
+      documentIds: docs.map((d) => d.documentId),
+      concepts,
+      themes,
+      dimensions,
+      isEmpty: false,
+    };
   }
 
   private async distinctPairs(
@@ -361,7 +357,7 @@ export class CodebookService implements OnModuleInit {
     const [docs, raw, foc, sot, agg, gds] = await Promise.all([
       this.prisma.analyzedDocument.findMany({
         where,
-        orderBy: [{ createdAt: "asc" }, { documentId: "asc" }],
+        orderBy: [{ createdAt: "desc" }, { documentId: "desc" }],
       }),
       this.prisma.rawExcerpt.findMany({ where }),
       this.prisma.firstOrderConcept.findMany({ where }),

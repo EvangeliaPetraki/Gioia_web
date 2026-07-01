@@ -1,3 +1,4 @@
+import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
@@ -16,6 +17,7 @@ import {
   GIOIA_OUTPUT_CONTRACT,
   GIOIA_SYSTEM_PROMPT,
   STAGE_SYSTEM,
+  type ExistingContext,
 } from "./gioia.constants";
 
 type Json = Record<string, unknown>;
@@ -39,10 +41,52 @@ const FLAG_OPTIONS = [
   "[TERRITORIAL LOGIC: LIMITED DIFFERENTIATION]",
 ];
 
+/**
+ * Each stage is assigned a "tier": extraction (stage 1), concept coding (stage 2),
+ * or reasoning/writing (stages 3-5, and single-mode). `MODEL_PROFILE` maps the
+ * tiers to concrete models across providers.
+ */
+type Tier = "extract" | "concepts" | "reason";
+interface ModelRef {
+  provider: "anthropic" | "chutes";
+  model: string;
+}
+
+const PROFILES: Record<string, Record<Tier, ModelRef>> = {
+  // All Claude (default): faithful extraction on Sonnet, cheap high-volume
+  // concept coding on Haiku, strong reasoning/writing on Sonnet. Override with
+  // MODEL_REASON=claude-opus-4-8 for top-tier reasoning at higher cost.
+  claude: {
+    extract: { provider: "anthropic", model: "claude-sonnet-4-6" },
+    concepts: { provider: "anthropic", model: "claude-haiku-4-5" },
+    reason: { provider: "anthropic", model: "claude-sonnet-4-6" },
+  },
+  // Hybrid: cheap open models on the high-throughput stages, Claude Opus for
+  // the judgement/writing stages.
+  hybrid: {
+    extract: { provider: "chutes", model: "deepseek-ai/DeepSeek-V3.2-TEE" },
+    concepts: { provider: "chutes", model: "Qwen/Qwen3-32B-TEE" },
+    reason: { provider: "anthropic", model: "claude-opus-4-8" },
+  },
+  // All Chutes (open models only) — cheapest.
+  chutes: {
+    extract: { provider: "chutes", model: "deepseek-ai/DeepSeek-V3.2-TEE" },
+    concepts: { provider: "chutes", model: "Qwen/Qwen3-32B-TEE" },
+    reason: { provider: "chutes", model: "zai-org/GLM-5.2-TEE" },
+  },
+};
+
+const OVERRIDE_ENV: Record<Tier, string> = {
+  extract: "MODEL_EXTRACT",
+  concepts: "MODEL_CONCEPTS",
+  reason: "MODEL_REASON",
+};
+
 @Injectable()
 export class GioiaService {
   private readonly logger = new Logger(GioiaService.name);
   private client: OpenAI | null = null;
+  private anthropic: Anthropic | null = null;
 
   constructor(private readonly config: ConfigService) {}
 
@@ -64,16 +108,57 @@ export class GioiaService {
     return this.client;
   }
 
+  private getAnthropic(): Anthropic {
+    const apiKey = this.config.get<string>("ANTHROPIC_API_KEY");
+    if (!apiKey) {
+      throw new ServiceUnavailableException(
+        "ANTHROPIC_API_KEY is not configured. Add it to apps/api/.env to use a Claude model " +
+          "(MODEL_PROFILE=claude or hybrid).",
+      );
+    }
+    if (!this.anthropic) {
+      this.anthropic = new Anthropic({ apiKey, timeout: 600_000, maxRetries: 1 });
+    }
+    return this.anthropic;
+  }
+
+  /** Resolve which provider + model to use for a tier, honouring per-tier overrides. */
+  private resolveModel(tier: Tier): ModelRef {
+    const profileName = (this.config.get<string>("MODEL_PROFILE") ?? "claude").toLowerCase();
+    const profile = PROFILES[profileName] ?? PROFILES.claude;
+    const override = this.config.get<string>(OVERRIDE_ENV[tier])?.trim();
+    return override ? parseModelRef(override) : profile[tier];
+  }
+
   /**
    * Run the full Gioia analysis on one policy document. Dispatches on
    * `PIPELINE_MODE`: "staged" (default-able multi-call pipeline with per-stage
    * validation) or "single" (the legacy one-shot call, kept as a fallback).
    */
-  async analyse(policyText: string, fileName: string, existingContext: string): Promise<GioiaAnalysis> {
+  async analyse(policyText: string, fileName: string, existing: ExistingContext): Promise<GioiaAnalysis> {
     const mode = (this.config.get<string>("PIPELINE_MODE") ?? "single").toLowerCase();
     return mode === "staged"
-      ? this.analyseStaged(policyText, fileName, existingContext)
-      : this.analyseSingle(policyText, fileName, existingContext);
+      ? this.analyseStaged(policyText, fileName, existing)
+      : this.analyseSingle(policyText, fileName, existing);
+  }
+
+  /**
+   * Render only the requested levels of the existing codebook as prompt text.
+   * Each stage receives just the vocabulary it can reuse, instead of the whole
+   * codebook — smaller prompts and better reuse focus (Step 7).
+   */
+  private contextSection(
+    existing: ExistingContext,
+    include: { concepts?: boolean; themes?: boolean; dimensions?: boolean },
+  ): string {
+    const head = existing.isEmpty
+      ? "The master codebook is currently empty — this is the first document; establish the initial code structure."
+      : `Documents already coded: ${existing.documentIds.join(", ")}`;
+    const blocks = [head];
+    if (include.concepts) blocks.push(codesSection("Existing first-order concepts:", existing.concepts));
+    if (include.themes) blocks.push(codesSection("Existing second-order themes:", existing.themes));
+    if (include.dimensions) blocks.push(codesSection("Existing aggregate dimensions:", existing.dimensions));
+    return blocks.join("\n\n");
   }
 
   // ── Staged pipeline ────────────────────────────────────────────────────────
@@ -81,10 +166,17 @@ export class GioiaService {
   private async analyseStaged(
     policyText: string,
     fileName: string,
-    existingContext: string,
+    existing: ExistingContext,
   ): Promise<GioiaAnalysis> {
-    // Stage 1 — metadata + raw excerpts + policy summary
+    // Each stage gets only the codebook level it reuses.
+    const conceptCtx = this.contextSection(existing, { concepts: true });
+    const themeCtx = this.contextSection(existing, { themes: true });
+    const dimensionCtx = this.contextSection(existing, { dimensions: true });
+    const synthesisCtx = this.contextSection(existing, { themes: true, dimensions: true });
+
+    // Stage 1 — metadata + raw excerpts + policy summary (no prior codes needed)
     const s1 = await this.runStage(
+      "extract",
       STAGE_SYSTEM.metadata,
       () => this.stage1User(fileName, policyText),
       (j) => this.validateStage1(j),
@@ -103,8 +195,9 @@ export class GioiaService {
 
     // Stage 2 — first-order concepts
     const s2 = await this.runStage(
+      "concepts",
       STAGE_SYSTEM.concepts,
-      () => this.stage2User(documentId, rawExcerpts, existingContext),
+      () => this.stage2User(documentId, rawExcerpts, conceptCtx),
       (j) => this.validateStage2(j, rawExcerpts),
       "stage2-concepts",
     );
@@ -119,8 +212,9 @@ export class GioiaService {
 
     // Stage 3 — second-order themes
     const s3 = await this.runStage(
+      "reason",
       STAGE_SYSTEM.themes,
-      () => this.stage3User(documentId, concepts, existingContext),
+      () => this.stage3User(documentId, concepts, themeCtx),
       (j) => this.validateStage3(j, concepts),
       "stage3-themes",
     );
@@ -134,8 +228,9 @@ export class GioiaService {
 
     // Stage 4 — aggregate dimensions
     const s4 = await this.runStage(
+      "reason",
       STAGE_SYSTEM.dimensions,
-      () => this.stage4User(documentId, themes, existingContext),
+      () => this.stage4User(documentId, themes, dimensionCtx),
       (j) => this.validateStage4(j, themes),
       "stage4-dimensions",
     );
@@ -150,8 +245,9 @@ export class GioiaService {
 
     // Stage 5 — cross-document flags + refinement summary + RQ memo
     const s5 = await this.runStage(
+      "reason",
       STAGE_SYSTEM.synthesis,
-      () => this.stage5User(documentId, meta, rawExcerpts, themes, dimensions, existingContext),
+      () => this.stage5User(documentId, meta, rawExcerpts, themes, dimensions, synthesisCtx),
       (j) => this.validateStage5(j, rawExcerpts),
       "stage5-synthesis",
     );
@@ -191,13 +287,14 @@ export class GioiaService {
 
   /** Run one stage, validate, repair once on failure, then fail loudly. */
   private async runStage(
+    tier: Tier,
     system: string,
     buildUser: () => string,
     validate: (j: Json) => string[],
     label: string,
   ): Promise<Json> {
     const user = buildUser();
-    let parsed = await this.callModel(system, user, label);
+    let parsed = await this.callModel(system, user, label, tier);
     let errs = validate(parsed);
     if (errs.length === 0) return parsed;
 
@@ -205,7 +302,7 @@ export class GioiaService {
     const repairUser = `${user}\n\nA PREVIOUS ATTEMPT FAILED THESE VALIDATION CHECKS:\n- ${errs.join(
       "\n- ",
     )}\n\nReturn a corrected JSON object that fixes every issue. Output JSON only.`;
-    parsed = await this.callModel(system, repairUser, `${label}-repair`);
+    parsed = await this.callModel(system, repairUser, `${label}-repair`, tier);
     errs = validate(parsed);
     if (errs.length === 0) return parsed;
 
@@ -462,15 +559,21 @@ export class GioiaService {
   private async analyseSingle(
     policyText: string,
     fileName: string,
-    existingContext: string,
+    existing: ExistingContext,
   ): Promise<GioiaAnalysis> {
+    // Single-call mode does every step at once, so it gets all levels.
+    const fullContext = this.contextSection(existing, {
+      concepts: true,
+      themes: true,
+      dimensions: true,
+    });
     const systemPrompt = `${GIOIA_SYSTEM_PROMPT}\n\n${GIOIA_OUTPUT_CONTRACT}`;
     const userMessage = [
       `UPLOADED FILE NAME: ${fileName}`,
       `Derive the Document_ID from this file name where it already encodes one (e.g. "EU_01.pdf" -> "EU_01").`,
       "",
       "CURRENT MASTER CODEBOOK (for cross-document comparison / code reuse — Step 7):",
-      existingContext,
+      fullContext,
       "",
       "POLICY DOCUMENT TEXT:",
       "<<<BEGIN POLICY TEXT>>>",
@@ -478,15 +581,66 @@ export class GioiaService {
       "<<<END POLICY TEXT>>>",
     ].join("\n");
 
-    const parsed = await this.callModel(systemPrompt, userMessage, "single-call");
+    const parsed = await this.callModel(systemPrompt, userMessage, "single-call", "reason");
     return parsed as unknown as GioiaAnalysis;
   }
 
-  // ── Model call: stream, JSON mode (with fallback), tolerant parse ───────────
+  // ── Model call: route to the tier's provider, then tolerant JSON parse ──────
 
-  private async callModel(system: string, user: string, label: string): Promise<Json> {
+  private async callModel(system: string, user: string, label: string, tier: Tier): Promise<Json> {
+    const { provider, model } = this.resolveModel(tier);
+    const raw =
+      provider === "anthropic"
+        ? await this.callAnthropic(system, user, model, tier, label)
+        : await this.callChutes(system, user, model, label);
+    return this.parseJson(raw, label);
+  }
+
+  /** Claude via the Anthropic SDK — streaming, adaptive thinking on the reasoning tier. */
+  private async callAnthropic(
+    system: string,
+    user: string,
+    model: string,
+    tier: Tier,
+    label: string,
+  ): Promise<string> {
+    const client = this.getAnthropic();
+    const params: Record<string, unknown> = {
+      model,
+      max_tokens: tier === "reason" ? 24000 : 12000,
+      system,
+      messages: [{ role: "user", content: user }],
+    };
+    // Adaptive thinking + effort on the reasoning tier only (skip on extract/
+    // concepts, and on Haiku which supports neither). `MODEL_EFFORT` dials how
+    // hard the model thinks: low | medium | high | max — lower is cheaper/faster.
+    if (tier === "reason" && !/haiku/i.test(model)) {
+      params.thinking = { type: "adaptive" };
+      const effort = (this.config.get<string>("MODEL_EFFORT") ?? "medium").toLowerCase();
+      params.output_config = { effort };
+    }
+
+    try {
+      type StreamParams = Parameters<typeof client.messages.stream>[0];
+      const stream = client.messages.stream(params as unknown as StreamParams);
+      const message = await stream.finalMessage();
+      if (message.stop_reason === "refusal") {
+        throw new ServiceUnavailableException(`The analysis model declined the request (${label}).`);
+      }
+      let out = "";
+      for (const block of message.content) if (block.type === "text") out += block.text;
+      return out;
+    } catch (err) {
+      if (err instanceof ServiceUnavailableException) throw err;
+      const detail = err instanceof Error ? err.message : "unknown error";
+      this.logger.error(`${label} (Claude ${model}) request failed: ${detail}`);
+      throw new ServiceUnavailableException(`Analysis model request failed: ${detail}`);
+    }
+  }
+
+  /** Open models via Chutes (OpenAI-compatible) — streaming JSON mode with fallback. */
+  private async callChutes(system: string, user: string, model: string, label: string): Promise<string> {
     const client = this.getClient();
-    const model = this.config.get<string>("CHUTES_MODEL") ?? "zai-org/GLM-5-Turbo";
     const base = {
       model,
       messages: [
@@ -497,21 +651,17 @@ export class GioiaService {
       temperature: 0.2,
       stream: true as const,
     };
-
-    let raw: string;
     try {
-      raw = await this.stream(client, { ...base, response_format: { type: "json_object" } });
+      return await this.stream(client, { ...base, response_format: { type: "json_object" } });
     } catch (err) {
       if (this.isBadRequest(err)) {
         this.logger.warn(`${label}: provider rejected response_format; retrying without JSON mode.`);
-        raw = await this.stream(client, base);
-      } else {
-        const detail = err instanceof Error ? err.message : "unknown error";
-        this.logger.error(`${label} request failed: ${detail}`);
-        throw new ServiceUnavailableException(`Analysis model request failed: ${detail}`);
+        return await this.stream(client, base);
       }
+      const detail = err instanceof Error ? err.message : "unknown error";
+      this.logger.error(`${label} (Chutes ${model}) request failed: ${detail}`);
+      throw new ServiceUnavailableException(`Analysis model request failed: ${detail}`);
     }
-    return this.parseJson(raw, label);
   }
 
   private async stream(
@@ -565,6 +715,24 @@ export class GioiaService {
 }
 
 // ── small helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Parse a per-tier override into a provider + model. Accepts an explicit
+ * `anthropic:`/`chutes:` prefix, otherwise infers Anthropic for `claude-*` ids
+ * and Chutes for everything else. Examples: "claude-opus-4-8",
+ * "chutes:Qwen/Qwen3-32B-TEE", "anthropic:claude-sonnet-4-6".
+ */
+function parseModelRef(value: string): ModelRef {
+  if (value.startsWith("anthropic:")) return { provider: "anthropic", model: value.slice("anthropic:".length) };
+  if (value.startsWith("chutes:")) return { provider: "chutes", model: value.slice("chutes:".length) };
+  if (/^claude/i.test(value)) return { provider: "anthropic", model: value };
+  return { provider: "chutes", model: value };
+}
+
+/** Render an "ID: label" code list under a header, or a "(none yet)" placeholder. */
+function codesSection(header: string, items: string[]): string {
+  return `${header}\n${items.length ? items.join("\n") : "(none yet)"}`;
+}
 
 function str(v: unknown): string {
   return v == null ? "" : String(v).trim();

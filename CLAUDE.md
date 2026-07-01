@@ -84,12 +84,19 @@ the spec and must not change).
   ≤25 MB), `GET /api/analysis/policies`, `GET /api/analysis/workbook` (downloads the xlsx).
 - `pdf.service.ts` — extracts text with `pdf-parse` (imported from `pdf-parse/lib/pdf-parse.js`
   to dodge its debug-mode bug); rejects image-only PDFs.
-- `gioia.service.ts` — calls the LLM via the **OpenAI SDK pointed at Chutes**
-  (`https://llm.chutes.ai/v1`, model `zai-org/GLM-5-Turbo`), **streaming**, requesting
-  `response_format: {type:"json_object"}` (falls back to no-JSON-mode on a 400) and parsing
-  the result tolerantly (code fences / prose stripped). Reads `CHUTES_API_KEY` /
-  `CHUTES_BASE_URL` / `CHUTES_MODEL` from env. To use a different OpenAI-compatible provider,
-  change those three env vars — no code change needed.
+- `gioia.service.ts` — runs the analysis, **streaming**, and routes each pipeline stage to a
+  model by *tier*: `extract` (stage 1), `concepts` (stage 2), `reason` (stages 3–5 + single).
+  `MODEL_PROFILE` maps tiers to models across two providers — **Anthropic** (Claude, via
+  `@anthropic-ai/sdk`, adaptive thinking on the `reason` tier) and **Chutes** (open models, via
+  the OpenAI SDK at `https://llm.chutes.ai/v1`, `response_format:{type:"json_object"}` with a
+  no-JSON-mode fallback). Profiles: `claude` (Sonnet/Haiku/Sonnet, **default**), `hybrid`
+  (DeepSeek/Qwen/Opus), `chutes` (all open). Per-tier env overrides `MODEL_EXTRACT` /
+  `MODEL_CONCEPTS` / `MODEL_REASON` win over the profile (provider inferred from the id, or
+  forced with an `anthropic:`/`chutes:` prefix). `MODEL_EFFORT` (low|medium|high|max, default
+  medium) dials Claude's thinking depth on the reasoning tier — the main cost/quality knob.
+  Output parsed tolerantly (fences/prose stripped). Tiering only applies in `staged` mode
+  (`PIPELINE_MODE`). Each stage receives only the codebook levels it reuses (concepts→stage 2,
+  themes→stage 3, dimensions→stage 4, themes+dimensions→stage 5).
 - `codebook.service.ts` — `exceljs` read/create/append. Writes the 9 worksheets with the
   spec's exact headers. **Rows are written positionally (by column order), not by key** —
   exceljs does not restore column keys when a workbook is read back from disk, so key-based
@@ -106,9 +113,9 @@ the spec and must not change).
 sequential job queue (the shared codebook is updated one doc at a time), per-document counts
 + summary, a download button, and the analysed-policies table.
 
-**Setup:** set `CHUTES_API_KEY` / `CHUTES_BASE_URL` / `CHUTES_MODEL` in `apps/api/.env`. The
-master codebook is created on the first successful upload at `CODEBOOK_PATH` (default
-`apps/api/data/...`).
+**Setup:** set `CHUTES_API_KEY` (+ `CHUTES_BASE_URL`) and, for the `claude`/`hybrid` profiles,
+`ANTHROPIC_API_KEY` in `apps/api/.env`; choose `MODEL_PROFILE`. The master codebook is created
+on the first successful upload at `CODEBOOK_PATH` (default `apps/api/data/...`).
 
 **Extending the analysis:** worksheet headers/structure come from `gioia.constants.ts`
 (`SHEETS` + `GIOIA_OUTPUT_SCHEMA` + `GIOIA_SYSTEM_PROMPT`) — change them together. Keep the

@@ -4,6 +4,19 @@ import { GOVERNANCE_LEVELS } from "@gioia/dto";
 export const CODEBOOK_FILENAME = "SkillResilience4EU_Gioia_Master_Codebook.xlsx";
 
 /**
+ * The existing codebook's distinct code vocabulary, split by abstraction level
+ * so each pipeline stage can be handed only the level it reuses (Step 7). Each
+ * entry is an `"ID: label"` string, e.g. `"FOC_1: reskilling tourism workforce"`.
+ */
+export interface ExistingContext {
+  documentIds: string[];
+  concepts: string[];
+  themes: string[];
+  dimensions: string[];
+  isEmpty: boolean;
+}
+
+/**
  * Worksheet definitions: sheet name + ordered column headers, copied verbatim
  * from the WP5.2 prompt (including its exact spellings such as "Section/Page"
  * and "Aggregate_ID"). These headers must never be renamed or reordered.
