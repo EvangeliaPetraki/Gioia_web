@@ -42,9 +42,11 @@ async function bootstrap() {
   );
 
   const port = Number(process.env.PORT ?? 3001);
-  await app.listen(port);
+  // Bind 0.0.0.0 (not the default IPv6 `::`) so hosting proxies like Railway,
+  // which connect over IPv4, can reach the app — otherwise they return 502.
+  await app.listen(port, "0.0.0.0");
   // eslint-disable-next-line no-console
-  console.log(`API ready at http://localhost:${port}/api`);
+  console.log(`API ready on port ${port} (prefix /api)`);
 }
 
 bootstrap();
