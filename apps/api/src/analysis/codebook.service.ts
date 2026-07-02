@@ -5,6 +5,7 @@ import { Workbook, type Worksheet } from "exceljs";
 import type {
   CodebookDto,
   CodebookSheetDto,
+  CrossDocumentAggregateDto,
   GioiaAnalysis,
   PolicyDetailDto,
   PolicyListItemDto,
@@ -82,6 +83,60 @@ export class CodebookService implements OnModuleInit {
       countryOrRegion: d.countryOrRegion,
       governanceLevel: d.governanceLevel,
       dateAnalysed: d.dateAnalysed,
+    }));
+  }
+
+  /**
+   * Distinct second-order themes across a set of documents (deduped by Theme_ID),
+   * with the documents each theme appears in — input for cross-document
+   * aggregate-dimension synthesis.
+   */
+  async getThemesForDocuments(
+    documentIds: string[],
+  ): Promise<{ themeId: string; label: string; documents: string[] }[]> {
+    const rows = await this.prisma.secondOrderTheme.findMany({
+      where: { documentId: { in: documentIds } },
+      orderBy: [{ documentId: "asc" }, { orderIndex: "asc" }],
+    });
+    const byTheme = new Map<string, { label: string; documents: Set<string> }>();
+    for (const r of rows) {
+      if (!r.themeId) continue;
+      const entry = byTheme.get(r.themeId) ?? { label: r.secondOrderTheme, documents: new Set<string>() };
+      if (!entry.label) entry.label = r.secondOrderTheme;
+      entry.documents.add(r.documentId);
+      byTheme.set(r.themeId, entry);
+    }
+    return Array.from(byTheme, ([themeId, e]) => ({
+      themeId,
+      label: e.label,
+      documents: [...e.documents],
+    }));
+  }
+
+  /** Gioia data-structure rows for the selected documents, preserving document row order. */
+  async getGioiaStructureForDocuments(documentIds: string[]): Promise<
+    {
+      documentId: string;
+      conceptId: string;
+      firstOrderConcept: string;
+      themeId: string;
+      secondOrderTheme: string;
+      sourceAggregateId: string;
+      sourceAggregateDimension: string;
+    }[]
+  > {
+    const rows = await this.prisma.gioiaStructureRow.findMany({
+      where: { documentId: { in: documentIds } },
+      orderBy: [{ documentId: "asc" }, { orderIndex: "asc" }],
+    });
+    return rows.map((r) => ({
+      documentId: r.documentId,
+      conceptId: r.conceptId,
+      firstOrderConcept: r.firstOrderConcept,
+      themeId: r.themeId,
+      secondOrderTheme: r.secondOrderTheme,
+      sourceAggregateId: r.aggregateId,
+      sourceAggregateDimension: r.aggregateDimension,
     }));
   }
 
@@ -169,6 +224,69 @@ export class CodebookService implements OnModuleInit {
       for (let i = 0; i < def.columns.length; i++) ws.getColumn(i + 1).width = 28;
       for (const row of def.rows) ws.addRow(row);
     }
+    const out = await wb.xlsx.writeBuffer();
+    return Buffer.from(out);
+  }
+
+  /** Build the Excel export for a cross-document aggregate extraction result. */
+  async generateAggregateWorkbookBuffer(result: CrossDocumentAggregateDto): Promise<Buffer> {
+    const wb = new Workbook();
+
+    const structure = wb.addWorksheet("Gioia Data Structure");
+    structure.addRow([
+      "Document_ID",
+      "Concept_ID",
+      "First_Order_Concept",
+      "Theme_ID",
+      "Second_Order_Theme",
+      "Cross_Document_Aggregate_ID",
+      "Cross_Document_Aggregate_Dimension",
+      "Source_Aggregate_ID",
+      "Source_Aggregate_Dimension",
+    ]);
+    for (const row of result.structureRows) {
+      structure.addRow([
+        row.documentId,
+        row.conceptId,
+        row.firstOrderConcept,
+        row.themeId,
+        row.secondOrderTheme,
+        row.aggregateId,
+        row.aggregateDimension,
+        row.sourceAggregateId,
+        row.sourceAggregateDimension,
+      ]);
+    }
+
+    const dimensions = wb.addWorksheet("Aggregate Dimensions");
+    dimensions.addRow([
+      "Aggregate_ID",
+      "Aggregate_Dimension",
+      "Description",
+      "Second_Order_Themes",
+      "Theme_IDs",
+      "Example_Policies",
+    ]);
+    for (const d of result.dimensions) {
+      dimensions.addRow([
+        d.aggregateId,
+        d.aggregateDimension,
+        d.description,
+        d.secondOrderThemes,
+        d.themeIds,
+        d.examplePolicies,
+      ]);
+    }
+
+    const summary = wb.addWorksheet("Selected Documents");
+    summary.addRow(["Document_ID"]);
+    for (const id of result.documentIds) summary.addRow([id]);
+
+    for (const ws of wb.worksheets) {
+      ws.getRow(1).font = { bold: true };
+      for (let i = 1; i <= ws.columnCount; i++) ws.getColumn(i).width = 28;
+    }
+
     const out = await wb.xlsx.writeBuffer();
     return Buffer.from(out);
   }

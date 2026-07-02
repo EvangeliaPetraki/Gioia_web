@@ -178,6 +178,19 @@ model AggregateDimension {
   @@map("aggregate_dimensions")
 }
 
+// Singleton row holding the admin-selected model configuration for the pipeline
+// (replaces the env-driven MODEL_PROFILE / PIPELINE_MODE / MODEL_EFFORT).
+model AnalysisSetting {
+  id          String   @id @default("singleton")
+  mode        String   @default("staged")
+  profile     String   @default("claude")
+  singleModel String   @default("chutes:zai-org/GLM-5-TEE")
+  effort      String   @default("medium")
+  updatedAt   DateTime @updatedAt
+
+  @@map("analysis_settings")
+}
+
 model GioiaStructureRow {
   id                Int    @id @default(autoincrement())
   documentId        String

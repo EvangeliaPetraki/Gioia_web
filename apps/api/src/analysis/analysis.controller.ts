@@ -18,14 +18,18 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 import type {
+  AnalysisSettingsDto,
+  AnalysisSettingsResponseDto,
   AnalysisSummaryDto,
   CodebookDto,
+  CrossDocumentAggregateDto,
   PolicyDetailDto,
   PolicyListItemDto,
 } from "@gioia/dto";
-import { UpdateNoteDto } from "@gioia/dto";
+import { ExtractAggregateDto, UpdateAnalysisSettingsDto, UpdateNoteDto } from "@gioia/dto";
 import { AnalysisService } from "./analysis.service";
 import { AuthGuard } from "../auth/auth.guard";
+import { AdminGuard } from "../auth/admin.guard";
 
 const MAX_PDF_BYTES = 25 * 1024 * 1024; // 25 MB
 
@@ -61,6 +65,42 @@ export class AnalysisController {
   @Get("codebook")
   getCodebook(): Promise<CodebookDto> {
     return this.analysis.getWorkbookData();
+  }
+
+  /** Current model selection + available options (any authenticated user). */
+  @Get("settings")
+  getSettings(): Promise<AnalysisSettingsResponseDto> {
+    return this.analysis.getSettings();
+  }
+
+  /** Change the model selection (admin only). */
+  @Patch("settings")
+  @UseGuards(AdminGuard)
+  updateSettings(@Body() dto: UpdateAnalysisSettingsDto): Promise<AnalysisSettingsDto> {
+    return this.analysis.updateSettings(dto);
+  }
+
+  /** Synthesise aggregate dimensions across selected documents (admin only). */
+  @Post("aggregate")
+  @UseGuards(AdminGuard)
+  extractAggregate(@Body() dto: ExtractAggregateDto): Promise<CrossDocumentAggregateDto> {
+    return this.analysis.aggregateDimensions(dto.documentIds);
+  }
+
+  /** Export one already-generated cross-document aggregate result as Excel. */
+  @Post("aggregate/workbook")
+  @UseGuards(AdminGuard)
+  @Header(
+    "Content-Type",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  )
+  async downloadAggregateWorkbook(
+    @Res({ passthrough: true }) res: Response,
+    @Body() dto: CrossDocumentAggregateDto,
+  ): Promise<StreamableFile> {
+    const suffix = dto.documentIds?.length ? dto.documentIds.join("_") : "selected-documents";
+    res.set("Content-Disposition", `attachment; filename="Gioia_Aggregate_Dimensions_${suffix}.xlsx"`);
+    return new StreamableFile(await this.analysis.generateAggregateWorkbook(dto));
   }
 
   @Get("policies/:documentId")

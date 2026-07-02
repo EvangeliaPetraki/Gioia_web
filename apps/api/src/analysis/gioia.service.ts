@@ -4,6 +4,7 @@ import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common"
 import { ConfigService } from "@nestjs/config";
 import type {
   AggregateDimension,
+  AnalysisSettingsDto,
   FirstOrderConcept,
   GioiaAnalysis,
   GioiaStructureRow,
@@ -14,11 +15,19 @@ import type {
 } from "@gioia/dto";
 import { GOVERNANCE_LEVELS } from "@gioia/dto";
 import {
+  CROSS_DOC_AGGREGATE_SYSTEM,
   GIOIA_OUTPUT_CONTRACT,
   GIOIA_SYSTEM_PROMPT,
   STAGE_SYSTEM,
   type ExistingContext,
 } from "./gioia.constants";
+import { SettingsService } from "./settings.service";
+
+/** Whether a model call should use adaptive thinking, and at what effort. */
+interface CallOpts {
+  think: boolean;
+  effort: string;
+}
 
 type Json = Record<string, unknown>;
 
@@ -76,19 +85,16 @@ const PROFILES: Record<string, Record<Tier, ModelRef>> = {
   },
 };
 
-const OVERRIDE_ENV: Record<Tier, string> = {
-  extract: "MODEL_EXTRACT",
-  concepts: "MODEL_CONCEPTS",
-  reason: "MODEL_REASON",
-};
-
 @Injectable()
 export class GioiaService {
   private readonly logger = new Logger(GioiaService.name);
   private client: OpenAI | null = null;
   private anthropic: Anthropic | null = null;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly settings: SettingsService,
+  ) {}
 
   private getClient(): OpenAI {
     const apiKey = this.config.get<string>("CHUTES_API_KEY");
@@ -122,24 +128,21 @@ export class GioiaService {
     return this.anthropic;
   }
 
-  /** Resolve which provider + model to use for a tier, honouring per-tier overrides. */
-  private resolveModel(tier: Tier): ModelRef {
-    const profileName = (this.config.get<string>("MODEL_PROFILE") ?? "claude").toLowerCase();
-    const profile = PROFILES[profileName] ?? PROFILES.claude;
-    const override = this.config.get<string>(OVERRIDE_ENV[tier])?.trim();
-    return override ? parseModelRef(override) : profile[tier];
+  /** Resolve which provider + model to use for a tier under the given profile. */
+  private resolveModel(tier: Tier, profile: string): ModelRef {
+    return (PROFILES[profile] ?? PROFILES.claude)[tier];
   }
 
   /**
-   * Run the full Gioia analysis on one policy document. Dispatches on
-   * `PIPELINE_MODE`: "staged" (default-able multi-call pipeline with per-stage
-   * validation) or "single" (the legacy one-shot call, kept as a fallback).
+   * Run the full Gioia analysis on one policy document. The active model
+   * selection comes from the admin-managed settings (DB): "staged" (multi-call
+   * pipeline with per-stage validation) or "single" (one call, one model).
    */
   async analyse(policyText: string, fileName: string, existing: ExistingContext): Promise<GioiaAnalysis> {
-    const mode = (this.config.get<string>("PIPELINE_MODE") ?? "single").toLowerCase();
-    return mode === "staged"
-      ? this.analyseStaged(policyText, fileName, existing)
-      : this.analyseSingle(policyText, fileName, existing);
+    const settings = await this.settings.getSettings();
+    return settings.mode === "single"
+      ? this.analyseSingle(policyText, fileName, existing, settings)
+      : this.analyseStaged(policyText, fileName, existing, settings);
   }
 
   /**
@@ -167,6 +170,7 @@ export class GioiaService {
     policyText: string,
     fileName: string,
     existing: ExistingContext,
+    settings: AnalysisSettingsDto,
   ): Promise<GioiaAnalysis> {
     // Each stage gets only the codebook level it reuses.
     const conceptCtx = this.contextSection(existing, { concepts: true });
@@ -174,9 +178,18 @@ export class GioiaService {
     const dimensionCtx = this.contextSection(existing, { dimensions: true });
     const synthesisCtx = this.contextSection(existing, { themes: true, dimensions: true });
 
+    // Resolve the model for each tier once, from the selected profile.
+    const effort = settings.effort;
+    const extractRef = this.resolveModel("extract", settings.profile);
+    const conceptsRef = this.resolveModel("concepts", settings.profile);
+    const reasonRef = this.resolveModel("reason", settings.profile);
+    const noThink: CallOpts = { think: false, effort };
+    const think: CallOpts = { think: true, effort };
+
     // Stage 1 — metadata + raw excerpts + policy summary (no prior codes needed)
     const s1 = await this.runStage(
-      "extract",
+      extractRef,
+      noThink,
       STAGE_SYSTEM.metadata,
       () => this.stage1User(fileName, policyText),
       (j) => this.validateStage1(j),
@@ -195,7 +208,8 @@ export class GioiaService {
 
     // Stage 2 — first-order concepts
     const s2 = await this.runStage(
-      "concepts",
+      conceptsRef,
+      noThink,
       STAGE_SYSTEM.concepts,
       () => this.stage2User(documentId, rawExcerpts, conceptCtx),
       (j) => this.validateStage2(j, rawExcerpts),
@@ -212,7 +226,8 @@ export class GioiaService {
 
     // Stage 3 — second-order themes
     const s3 = await this.runStage(
-      "reason",
+      reasonRef,
+      think,
       STAGE_SYSTEM.themes,
       () => this.stage3User(documentId, concepts, themeCtx),
       (j) => this.validateStage3(j, concepts),
@@ -228,7 +243,8 @@ export class GioiaService {
 
     // Stage 4 — aggregate dimensions
     const s4 = await this.runStage(
-      "reason",
+      reasonRef,
+      think,
       STAGE_SYSTEM.dimensions,
       () => this.stage4User(documentId, themes, dimensionCtx),
       (j) => this.validateStage4(j, themes),
@@ -245,7 +261,8 @@ export class GioiaService {
 
     // Stage 5 — cross-document flags + refinement summary + RQ memo
     const s5 = await this.runStage(
-      "reason",
+      reasonRef,
+      think,
       STAGE_SYSTEM.synthesis,
       () => this.stage5User(documentId, meta, rawExcerpts, themes, dimensions, synthesisCtx),
       (j) => this.validateStage5(j, rawExcerpts),
@@ -287,14 +304,15 @@ export class GioiaService {
 
   /** Run one stage, validate, repair once on failure, then fail loudly. */
   private async runStage(
-    tier: Tier,
+    ref: ModelRef,
+    opts: CallOpts,
     system: string,
     buildUser: () => string,
     validate: (j: Json) => string[],
     label: string,
   ): Promise<Json> {
     const user = buildUser();
-    let parsed = await this.callModel(system, user, label, tier);
+    let parsed = await this.callModel(system, user, label, ref, opts);
     let errs = validate(parsed);
     if (errs.length === 0) return parsed;
 
@@ -302,7 +320,7 @@ export class GioiaService {
     const repairUser = `${user}\n\nA PREVIOUS ATTEMPT FAILED THESE VALIDATION CHECKS:\n- ${errs.join(
       "\n- ",
     )}\n\nReturn a corrected JSON object that fixes every issue. Output JSON only.`;
-    parsed = await this.callModel(system, repairUser, `${label}-repair`, tier);
+    parsed = await this.callModel(system, repairUser, `${label}-repair`, ref, opts);
     errs = validate(parsed);
     if (errs.length === 0) return parsed;
 
@@ -554,12 +572,83 @@ export class GioiaService {
     return rows;
   }
 
+  // ── Cross-document aggregate-dimension synthesis ────────────────────────────
+
+  /** Group the second-order themes of several documents into aggregate dimensions. */
+  async aggregateAcrossDocuments(
+    documentIds: string[],
+    themes: { themeId: string; label: string; documents: string[] }[],
+  ): Promise<AggregateDimension[]> {
+    const settings = await this.settings.getSettings();
+    const ref =
+      settings.mode === "single"
+        ? parseModelRef(settings.singleModel)
+        : this.resolveModel("reason", settings.profile);
+    const opts: CallOpts = { think: ref.provider === "anthropic", effort: settings.effort };
+
+    const j = await this.runStage(
+      ref,
+      opts,
+      CROSS_DOC_AGGREGATE_SYSTEM,
+      () =>
+        [
+          `POLICY DOCUMENTS: ${documentIds.join(", ")}`,
+          "",
+          "SECOND-ORDER THEMES TO GROUP (group ALL of them; use each Theme_ID verbatim; " +
+            "in Example_Policies list the Document_IDs a theme came from):",
+          JSON.stringify(
+            themes.map((t) => ({
+              Theme_ID: t.themeId,
+              Second_Order_Theme: t.label,
+              Documents: t.documents,
+            })),
+          ),
+        ].join("\n"),
+      (res) => this.validateCrossDocAggregate(res, themes),
+      "cross-doc-aggregate",
+    );
+
+    return asArray(j.aggregate_dimensions).map((a) => ({
+      Aggregate_ID: str(a.Aggregate_ID),
+      Theme_IDs: str(a.Theme_IDs),
+      Second_Order_Themes: str(a.Second_Order_Themes),
+      Aggregate_Dimension: str(a.Aggregate_Dimension),
+      Description: str(a.Description),
+      Example_Policies: str(a.Example_Policies),
+    }));
+  }
+
+  private validateCrossDocAggregate(j: Json, themes: { themeId: string }[]): string[] {
+    const errs: string[] = [];
+    const themeIds = new Set(themes.map((t) => t.themeId));
+    const dims = asArray(j.aggregate_dimensions);
+    if (dims.length === 0) errs.push("aggregate_dimensions is empty.");
+    const aggIds = new Set<string>();
+    const grouped = new Set<string>();
+    for (const d of dims) {
+      const aid = str(d.Aggregate_ID);
+      if (!/^AGG_\d+/.test(aid)) errs.push(`Aggregate_ID "${aid}" is malformed (expected AGG_1).`);
+      if (aggIds.has(aid)) errs.push(`Duplicate Aggregate_ID "${aid}".`);
+      aggIds.add(aid);
+      if (!str(d.Aggregate_Dimension)) errs.push(`Aggregate_Dimension is empty for ${aid}.`);
+      for (const tid of splitIds(d.Theme_IDs)) {
+        if (!themeIds.has(tid)) errs.push(`Dimension ${aid} references unknown Theme_ID "${tid}".`);
+        else grouped.add(tid);
+      }
+    }
+    for (const tid of themeIds) {
+      if (!grouped.has(tid)) errs.push(`Theme ${tid} is not grouped into any aggregate dimension.`);
+    }
+    return errs;
+  }
+
   // ── Legacy single-call pipeline (PIPELINE_MODE=single, the fallback) ─────────
 
   private async analyseSingle(
     policyText: string,
     fileName: string,
     existing: ExistingContext,
+    settings: AnalysisSettingsDto,
   ): Promise<GioiaAnalysis> {
     // Single-call mode does every step at once, so it gets all levels.
     const fullContext = this.contextSection(existing, {
@@ -581,43 +670,53 @@ export class GioiaService {
       "<<<END POLICY TEXT>>>",
     ].join("\n");
 
-    const parsed = await this.callModel(systemPrompt, userMessage, "single-call", "reason");
+    // One model for the whole analysis. Claude models get adaptive thinking +
+    // effort; open Chutes models run plain (they handle their own reasoning).
+    const ref = parseModelRef(settings.singleModel);
+    const parsed = await this.callModel(systemPrompt, userMessage, "single-call", ref, {
+      think: ref.provider === "anthropic",
+      effort: settings.effort,
+    });
     return parsed as unknown as GioiaAnalysis;
   }
 
   // ── Model call: route to the tier's provider, then tolerant JSON parse ──────
 
-  private async callModel(system: string, user: string, label: string, tier: Tier): Promise<Json> {
-    const { provider, model } = this.resolveModel(tier);
+  private async callModel(
+    system: string,
+    user: string,
+    label: string,
+    ref: ModelRef,
+    opts: CallOpts,
+  ): Promise<Json> {
     const raw =
-      provider === "anthropic"
-        ? await this.callAnthropic(system, user, model, tier, label)
-        : await this.callChutes(system, user, model, label);
+      ref.provider === "anthropic"
+        ? await this.callAnthropic(system, user, ref.model, opts, label)
+        : await this.callChutes(system, user, ref.model, label);
     return this.parseJson(raw, label);
   }
 
-  /** Claude via the Anthropic SDK — streaming, adaptive thinking on the reasoning tier. */
+  /** Claude via the Anthropic SDK — streaming, adaptive thinking when requested. */
   private async callAnthropic(
     system: string,
     user: string,
     model: string,
-    tier: Tier,
+    opts: CallOpts,
     label: string,
   ): Promise<string> {
     const client = this.getAnthropic();
     const params: Record<string, unknown> = {
       model,
-      max_tokens: tier === "reason" ? 24000 : 12000,
+      max_tokens: opts.think ? 24000 : 12000,
       system,
       messages: [{ role: "user", content: user }],
     };
-    // Adaptive thinking + effort on the reasoning tier only (skip on extract/
-    // concepts, and on Haiku which supports neither). `MODEL_EFFORT` dials how
-    // hard the model thinks: low | medium | high | max — lower is cheaper/faster.
-    if (tier === "reason" && !/haiku/i.test(model)) {
+    // Adaptive thinking + effort only where requested (skip on extract/concepts,
+    // and on Haiku which supports neither). Effort dials how hard the model
+    // thinks: low | medium | high | max — lower is cheaper/faster.
+    if (opts.think && !/haiku/i.test(model)) {
       params.thinking = { type: "adaptive" };
-      const effort = (this.config.get<string>("MODEL_EFFORT") ?? "medium").toLowerCase();
-      params.output_config = { effort };
+      params.output_config = { effort: opts.effort };
     }
 
     try {

@@ -1,8 +1,12 @@
 import type {
+  AnalysisSettingsDto,
+  AnalysisSettingsResponseDto,
   AnalysisSummaryDto,
   CodebookDto,
+  CrossDocumentAggregateDto,
   PolicyDetailDto,
   PolicyListItemDto,
+  UpdateAnalysisSettingsDto,
 } from "@gioia/dto";
 import { API_URL } from "./api-url";
 
@@ -81,4 +85,50 @@ export const api = {
       `/analysis/policies/${encodeURIComponent(documentId)}/note`,
       { method: "PATCH", body: JSON.stringify({ note }) },
     ),
+
+  /** Current model selection + the options the admin UI renders. */
+  getSettings: () => request<AnalysisSettingsResponseDto>("/analysis/settings"),
+
+  /** Update the model selection (admin only). */
+  updateSettings: (patch: UpdateAnalysisSettingsDto) =>
+    request<AnalysisSettingsDto>("/analysis/settings", {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+
+  /** Synthesise aggregate dimensions across the selected documents (admin only). */
+  aggregateDimensions: (documentIds: string[]) =>
+    request<CrossDocumentAggregateDto>("/analysis/aggregate", {
+      method: "POST",
+      body: JSON.stringify({ documentIds }),
+    }),
+
+  /** Download the already-generated cross-document aggregate result as Excel. */
+  async downloadAggregateWorkbook(result: CrossDocumentAggregateDto): Promise<void> {
+    const res = await fetch(`${API_URL}/analysis/aggregate/workbook`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result),
+    });
+    if (res.status === 401) {
+      handleUnauthorized();
+      throw new Error("Not authorized");
+    }
+    if (!res.ok) {
+      const message = await res.text().catch(() => res.statusText);
+      throw new Error(`API ${res.status}: ${message}`);
+    }
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const suffix = result.documentIds.length ? result.documentIds.join("_") : "selected-documents";
+    a.href = url;
+    a.download = `Gioia_Aggregate_Dimensions_${suffix}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
 };

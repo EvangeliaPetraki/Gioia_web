@@ -2,7 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { AnalysisSummaryDto, PolicyListItemDto } from "@gioia/dto";
+import type {
+  AnalysisSummaryDto,
+  CrossDocumentAggregateDto,
+  PolicyListItemDto,
+} from "@gioia/dto";
 import { api, workbookDownloadUrl } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
@@ -45,6 +49,22 @@ export default function DashboardPage() {
   const router = useRouter();
   const authed = useRequireAuth();
   const { data: session } = authClient.useSession();
+  const isAdmin = session?.user.role === "admin";
+
+  // Cross-document aggregate-dimension extraction (admin).
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [aggregating, setAggregating] = useState(false);
+  const [aggResult, setAggResult] = useState<CrossDocumentAggregateDto | null>(null);
+  const [aggError, setAggError] = useState<string | null>(null);
+  const [aggOpen, setAggOpen] = useState(false);
+  const [downloadingAgg, setDownloadingAgg] = useState(false);
+
+  const toggleSelected = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
 
   const refreshPolicies = useCallback(async () => {
     if (!authed) return;
@@ -122,18 +142,49 @@ export default function DashboardPage() {
   const queuedCount = jobs.filter((j) => j.status === "queued").length;
   const isProcessing = jobs.some((j) => j.status === "processing");
 
+  const allSelected = policies.length > 0 && policies.every((p) => selected.has(p.documentId));
+  const toggleAll = () =>
+    setSelected(allSelected ? new Set() : new Set(policies.map((p) => p.documentId)));
+
+  async function extractAggregate() {
+    setAggregating(true);
+    setAggError(null);
+    setAggResult(null);
+    setAggOpen(true);
+    try {
+      setAggResult(await api.aggregateDimensions([...selected]));
+    } catch (e) {
+      setAggError(e instanceof Error ? e.message : "Extraction failed.");
+    } finally {
+      setAggregating(false);
+    }
+  }
+
+  async function downloadAggregateWorkbook() {
+    if (!aggResult) return;
+    setDownloadingAgg(true);
+    setAggError(null);
+    try {
+      await api.downloadAggregateWorkbook(aggResult);
+    } catch (e) {
+      setAggError(e instanceof Error ? e.message : "Download failed.");
+    } finally {
+      setDownloadingAgg(false);
+    }
+  }
+
   if (!authed) return null;
 
   return (
-    <main className="container mx-auto max-w-4xl py-12">
-      <div className="mb-8 flex items-center justify-between">
-        <div>
+    <main className="container mx-auto max-w-6xl py-12">
+      <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="max-w-xl">
           <h1 className="text-3xl font-bold tracking-tight">Gioia Policy Analysis</h1>
           <p className="mt-1 text-muted-foreground">
             Upload policy PDFs — each is coded into the SkillResilience4EU master codebook.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2 lg:justify-end">
           <Button asChild variant="outline">
             <a href="/codebook">View full analysis</a>
           </Button>
@@ -141,9 +192,14 @@ export default function DashboardPage() {
             <a href={workbookDownloadUrl()}>Download codebook (.xlsx)</a>
           </Button>
           {session?.user.role === "admin" && (
-            <Button asChild variant="outline">
-              <a href="/admin/users">Manage users</a>
-            </Button>
+            <>
+              <Button asChild variant="outline">
+                <a href="/admin/settings">Model settings</a>
+              </Button>
+              <Button asChild variant="outline">
+                <a href="/admin/users">Manage users</a>
+              </Button>
+            </>
           )}
           <Button variant="ghost" onClick={() => void authClient.signOut()}>
             Log out
@@ -237,11 +293,29 @@ export default function DashboardPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Master codebook</CardTitle>
-          <CardDescription>
-            Policies coded into SkillResilience4EU_Gioia_Master_Codebook.xlsx — click a
-            row to open it in the full analysis.
-          </CardDescription>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <CardTitle>Master codebook</CardTitle>
+              <CardDescription>
+                Policies coded into SkillResilience4EU_Gioia_Master_Codebook.xlsx — click a
+                row to open it in the full analysis.
+              </CardDescription>
+            </div>
+            {isAdmin && policies.length > 0 && (
+              <Button
+                className="shrink-0"
+                onClick={() => void extractAggregate()}
+                disabled={aggregating || selected.size < 2}
+              >
+                {aggregating ? "Extracting…" : `Extract aggregate dimensions (${selected.size})`}
+              </Button>
+            )}
+          </div>
+          {isAdmin && policies.length > 0 && selected.size < 2 && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Tick two or more documents to synthesise aggregate dimensions across them.
+            </p>
+          )}
         </CardHeader>
         <CardContent>
           {policies.length === 0 ? (
@@ -250,6 +324,16 @@ export default function DashboardPage() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  {isAdmin && (
+                    <TableHead className="w-10">
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={toggleAll}
+                        aria-label="Select all documents"
+                      />
+                    </TableHead>
+                  )}
                   <TableHead>Document ID</TableHead>
                   <TableHead>Policy</TableHead>
                   <TableHead>Region</TableHead>
@@ -264,6 +348,16 @@ export default function DashboardPage() {
                     onClick={() => router.push(`/codebook?doc=${encodeURIComponent(p.documentId)}`)}
                     className="cursor-pointer hover:bg-accent/50"
                   >
+                    {isAdmin && (
+                      <TableCell onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selected.has(p.documentId)}
+                          onChange={() => toggleSelected(p.documentId)}
+                          aria-label={`Select ${p.documentId}`}
+                        />
+                      </TableCell>
+                    )}
                     <TableCell className="font-medium">{p.documentId}</TableCell>
                     <TableCell>{p.policyName}</TableCell>
                     <TableCell>{p.countryOrRegion}</TableCell>
@@ -276,6 +370,17 @@ export default function DashboardPage() {
           )}
         </CardContent>
       </Card>
+
+      {isAdmin && aggOpen && (
+        <AggregateResultModal
+          result={aggResult}
+          loading={aggregating}
+          error={aggError}
+          downloading={downloadingAgg}
+          onClose={() => setAggOpen(false)}
+          onDownload={() => void downloadAggregateWorkbook()}
+        />
+      )}
     </main>
   );
 }
@@ -296,6 +401,139 @@ function Metric({ label, value }: { label: string; value: number }) {
     <div className="rounded-md border px-3 py-1.5 text-sm">
       <span className="font-semibold">{value}</span>{" "}
       <span className="text-muted-foreground">{label}</span>
+    </div>
+  );
+}
+
+function AggregateResultModal({
+  result,
+  loading,
+  error,
+  downloading,
+  onClose,
+  onDownload,
+}: {
+  result: CrossDocumentAggregateDto | null;
+  loading: boolean;
+  error: string | null;
+  downloading: boolean;
+  onClose: () => void;
+  onDownload: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[90vh] w-full max-w-6xl flex-col rounded-lg border bg-card shadow-lg">
+        <div className="flex flex-col gap-3 border-b p-5 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h2 className="text-xl font-semibold tracking-tight">Aggregate Gioia structure</h2>
+            {result ? (
+              <p className="mt-1 text-sm text-muted-foreground">
+                {result.documentIds.length} documents · {result.themeCount} second-order themes ·{" "}
+                {result.dimensions.length} aggregate dimensions
+              </p>
+            ) : (
+              <p className="mt-1 text-sm text-muted-foreground">
+                Synthesising with the configured reasoning model.
+              </p>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2 lg:justify-end">
+            <Button onClick={onDownload} disabled={!result || loading || downloading}>
+              {downloading ? "Preparing..." : "Download Excel"}
+            </Button>
+            <Button variant="outline" onClick={onClose}>
+              Close
+            </Button>
+          </div>
+        </div>
+
+        <div className="min-h-0 overflow-y-auto p-5">
+          {loading && (
+            <p className="text-sm text-muted-foreground">
+              Synthesising aggregate dimensions across the selected documents. This may take a minute.
+            </p>
+          )}
+          {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
+          {result && (
+            <div className="space-y-6">
+              <section>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <h3 className="font-semibold">Gioia data structure</h3>
+                  <span className="text-sm text-muted-foreground">
+                    {result.structureRows.length} first-order concept rows
+                  </span>
+                </div>
+                <div className="max-h-[42vh] overflow-auto rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="min-w-[7rem]">Document</TableHead>
+                        <TableHead className="min-w-[14rem]">1st-order concept</TableHead>
+                        <TableHead className="min-w-[14rem]">2nd-order theme</TableHead>
+                        <TableHead className="min-w-[14rem]">Aggregate dimension</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {result.structureRows.map((row, index) => (
+                        <TableRow key={`${row.documentId}-${row.conceptId}-${row.themeId}-${index}`}>
+                          <TableCell className="font-medium">{row.documentId}</TableCell>
+                          <TableCell>
+                            <div className="text-xs text-muted-foreground">{row.conceptId}</div>
+                            <div>{row.firstOrderConcept}</div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="text-xs text-muted-foreground">{row.themeId}</div>
+                            <div>{row.secondOrderTheme}</div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="text-xs text-muted-foreground">{row.aggregateId}</div>
+                            <div>{row.aggregateDimension}</div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </section>
+
+              <section>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <h3 className="font-semibold">Aggregate dimensions</h3>
+                  <span className="text-sm text-muted-foreground">
+                    {result.dimensions.length} dimensions
+                  </span>
+                </div>
+                <div className="rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="min-w-[7rem]">ID</TableHead>
+                        <TableHead className="min-w-[14rem]">Dimension</TableHead>
+                        <TableHead className="min-w-[18rem]">Description</TableHead>
+                        <TableHead className="min-w-[18rem]">2nd-order themes</TableHead>
+                        <TableHead className="min-w-[10rem]">Documents</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {result.dimensions.map((dimension) => (
+                        <TableRow key={dimension.aggregateId}>
+                          <TableCell>
+                            <Badge variant="secondary">{dimension.aggregateId}</Badge>
+                          </TableCell>
+                          <TableCell className="font-medium">{dimension.aggregateDimension}</TableCell>
+                          <TableCell>{dimension.description}</TableCell>
+                          <TableCell>{dimension.secondOrderThemes}</TableCell>
+                          <TableCell>{dimension.examplePolicies}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </section>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

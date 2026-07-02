@@ -1,17 +1,29 @@
-import { Injectable } from "@nestjs/common";
+import { BadRequestException, Injectable } from "@nestjs/common";
 import type {
+  AnalysisSettingsDto,
+  AnalysisSettingsResponseDto,
   AnalysisSummaryDto,
   CodebookDto,
+  CrossDocumentAggregateDto,
   PolicyDetailDto,
   PolicyListItemDto,
+  UpdateAnalysisSettingsDto,
 } from "@gioia/dto";
 import { PdfService } from "./pdf.service";
 import { GioiaService } from "./gioia.service";
 import { CodebookService } from "./codebook.service";
+import { SettingsService } from "./settings.service";
+
+const splitIds = (s: string) =>
+  s
+    .split(/[;,]/)
+    .map((x) => x.trim())
+    .filter(Boolean);
 
 @Injectable()
 export class AnalysisService {
   constructor(
+    private readonly settings: SettingsService,
     private readonly pdf: PdfService,
     private readonly gioia: GioiaService,
     private readonly codebook: CodebookService,
@@ -64,5 +76,64 @@ export class AnalysisService {
 
   workbookFilename(): string {
     return this.codebook.filename;
+  }
+
+  /** Current model selection + the options the admin UI renders. */
+  getSettings(): Promise<AnalysisSettingsResponseDto> {
+    return this.settings.getSettingsResponse();
+  }
+
+  /** Update the model selection (admin only). */
+  updateSettings(patch: UpdateAnalysisSettingsDto): Promise<AnalysisSettingsDto> {
+    return this.settings.updateSettings(patch);
+  }
+
+  /** Synthesise aggregate dimensions across the selected documents' themes. */
+  async aggregateDimensions(documentIds: string[]): Promise<CrossDocumentAggregateDto> {
+    const ids = [...new Set(documentIds.map((s) => s.trim()).filter(Boolean))];
+    if (ids.length === 0) {
+      throw new BadRequestException("Select at least one analysed document.");
+    }
+    const themes = await this.codebook.getThemesForDocuments(ids);
+    if (themes.length === 0) {
+      throw new BadRequestException(
+        "The selected documents have no second-order themes to aggregate.",
+      );
+    }
+    const dimensions = await this.gioia.aggregateAcrossDocuments(ids, themes);
+    const dtoDimensions = dimensions.map((d) => ({
+      aggregateId: d.Aggregate_ID,
+      aggregateDimension: d.Aggregate_Dimension,
+      description: d.Description,
+      secondOrderThemes: d.Second_Order_Themes,
+      themeIds: d.Theme_IDs,
+      examplePolicies: d.Example_Policies,
+    }));
+    const dimensionByTheme = new Map<string, (typeof dtoDimensions)[number]>();
+    for (const d of dtoDimensions) {
+      for (const themeId of splitIds(d.themeIds)) {
+        if (!dimensionByTheme.has(themeId)) dimensionByTheme.set(themeId, d);
+      }
+    }
+    const structureRows = (await this.codebook.getGioiaStructureForDocuments(ids)).map((row) => {
+      const dimension = dimensionByTheme.get(row.themeId);
+      return {
+        ...row,
+        aggregateId: dimension?.aggregateId ?? "",
+        aggregateDimension: dimension?.aggregateDimension ?? "",
+      };
+    });
+
+    return {
+      documentIds: ids,
+      themeCount: themes.length,
+      dimensions: dtoDimensions,
+      structureRows,
+    };
+  }
+
+  /** Export a previously generated aggregate-dimension result as Excel. */
+  generateAggregateWorkbook(result: CrossDocumentAggregateDto): Promise<Buffer> {
+    return this.codebook.generateAggregateWorkbookBuffer(result);
   }
 }

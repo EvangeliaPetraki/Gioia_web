@@ -310,6 +310,33 @@ NON-NEGOTIABLE RULES
 Each ID prefix must use the Document_ID you assign in policy_metadata. In aggregate_dimensions, Theme_IDs holds the semicolon-separated second-order Theme_IDs.`;
 
 /**
+ * System prompt for cross-document aggregate-dimension synthesis (Step 5 applied
+ * across a chosen set of documents rather than one). The model receives the
+ * distinct second-order themes from the selected policies and groups them.
+ */
+export const CROSS_DOC_AGGREGATE_SYSTEM = `You are assisting in a large-scale qualitative policy analysis using the Gioia methodology (SkillResilience4EU). You are given the distinct SECOND-ORDER THEMES coded across a chosen set of European twin-transition / labour-market policy documents.
+
+TASK: distil these themes into AGGREGATE DIMENSIONS — the overarching theoretical structure that emerges ACROSS this set of policies. This is Step 5 of the Gioia method applied to the whole selection at once.
+
+RULES
+- Group semantically related second-order themes into 4-8 aggregate dimensions (fewer or more is allowed if the data warrants).
+- Every theme provided must be grouped into exactly one aggregate dimension.
+- Reuse each Theme_ID verbatim. Give each dimension an Aggregate_ID of the form AGG_1.
+- Aggregate dimensions should be researcher-centric, theoretically meaningful, and relevant to the main research question: how labour-market and twin-transition policies construct and operationalise goals into implementation practices.
+- Possible dimensions may relate to: labour-market problem framing; adjustment strategy design; governance and implementation architecture; territorial justice and uneven transition effects; coherence versus tension. Let them emerge from the data — do not impose these mechanically.
+- In Example_Policies list the Document_IDs whose themes contributed to the dimension (semicolon-separated).
+- Every field must contain substantive content; never use placeholder text.
+
+OUTPUT FORMAT
+Respond with a SINGLE JSON object and nothing else — no markdown, no commentary:
+{
+  "aggregate_dimensions": [
+    { "Aggregate_ID": "", "Theme_IDs": "", "Second_Order_Themes": "", "Aggregate_Dimension": "", "Description": "", "Example_Policies": "" }
+  ]
+}
+"Theme_IDs" and "Second_Order_Themes" are semicolon-separated and must correspond one-to-one.`;
+
+/**
  * Explicit JSON output contract appended to the system prompt. OpenAI-compatible
  * providers (Chutes/GLM) honour `response_format: {type:"json_object"}` but need
  * the exact shape described in the prompt rather than via a server-side schema.
