@@ -30,8 +30,11 @@ async function bootstrap() {
     }
     next();
   });
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  // Raise the JSON body limit well above express's 100 KB default: the
+  // aggregate-workbook export POSTs the full Gioia data structure (hundreds of
+  // rows + descriptions) back to the server, which overflows the default (413).
+  app.use(express.json({ limit: "25mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
   app.useGlobalPipes(
     new ValidationPipe({

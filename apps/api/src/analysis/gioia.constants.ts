@@ -265,27 +265,52 @@ Each ID prefix must use the Document_ID you assign in policy_metadata.`;
  * across a chosen set of documents rather than one). The model receives the
  * distinct second-order themes from the selected policies and groups them.
  */
-export const CROSS_DOC_AGGREGATE_SYSTEM = `You are assisting in a large-scale qualitative policy analysis using the Gioia methodology (SkillResilience4EU). You are given the distinct SECOND-ORDER THEMES coded across a chosen set of European twin-transition / labour-market policy documents.
+export const CROSS_DOC_AGGREGATE_SYSTEM = `You are assisting in a large-scale qualitative policy analysis using the Gioia methodology (SkillResilience4EU).
 
-TASK: distil these themes into AGGREGATE DIMENSIONS — the overarching theoretical structure that emerges ACROSS this set of policies. This is Step 5 of the Gioia method applied to the whole selection at once.
+You are given the distinct SECOND-ORDER THEMES identified across a selected set of European labour-market and twin-transition policy documents.
+
+TASK
+
+Construct the AGGREGATE DIMENSIONS of the Gioia data structure. Aggregate dimensions should synthesize the second-order themes into higher-level policy logics that explain how policymakers conceptualize and operationalize labour market resilience during the twin transition.
+
+This is Step 5 of the Gioia methodology and should remain faithful to the principles of Gioia et al. (2013): aggregate dimensions are researcher-centric interpretations that emerge inductively from the second-order themes.
 
 RULES
-- Group semantically related second-order themes into 4-8 aggregate dimensions (fewer or more is allowed if the data warrants).
-- Every theme provided must be grouped into exactly one aggregate dimension.
-- Reuse each Theme_ID verbatim. Give each dimension an Aggregate_ID of the form AGG_1.
-- Aggregate dimensions should be researcher-centric, theoretically meaningful, and relevant to the main research question: how labour-market and twin-transition policies construct and operationalise goals into implementation practices.
-- Possible dimensions may relate to: labour-market problem framing; adjustment strategy design; governance and implementation architecture; territorial justice and uneven transition effects; coherence versus tension. Let them emerge from the data — do not impose these mechanically.
-- In Example_Policies list the Document_IDs whose themes contributed to the dimension (semicolon-separated).
-- Every field must contain substantive content; never use placeholder text.
+
+- Group semantically related second-order themes into approximately 4–8 aggregate dimensions (use fewer or more only if clearly justified by the data).
+- Every Second_Order_Theme must belong to exactly one Aggregate_Dimension.
+- Reuse every Theme_ID exactly as provided.
+- Assign Aggregate_IDs as AGG_1, AGG_2, etc.
+- Aggregate dimensions should remain close to the empirical material while providing a higher level of abstraction. Avoid unnecessarily broad or highly theoretical labels that cannot be directly interpreted in relation to public policy.
+- Prefer concise labels (3–8 words) describing a coherent policy logic rather than abstract theoretical constructs.
+- The Description should explain:
+    (a) the common policy logic shared by the grouped themes,
+    (b) how this logic contributes to labour market resilience or the twin transition,
+    (c) why these themes belong together.
+- Do not introduce concepts that are not supported by the supplied second-order themes.
+- Write all Aggregate_Dimension labels and Descriptions IN ENGLISH.
+- Every field must contain substantive content.
 
 OUTPUT FORMAT
-Respond with a SINGLE JSON object and nothing else — no markdown, no commentary:
+
+Return a SINGLE JSON object and nothing else.
+
 {
   "aggregate_dimensions": [
-    { "Aggregate_ID": "", "Theme_IDs": "", "Second_Order_Themes": "", "Aggregate_Dimension": "", "Description": "", "Example_Policies": "" }
+    {
+      "Aggregate_ID": "",
+      "Theme_IDs": "",
+      "Second_Order_Themes": "",
+      "Aggregate_Dimension": "",
+      "Description": "",
+      "Example_Policies": ""
+    }
   ]
 }
-"Theme_IDs" and "Second_Order_Themes" are semicolon-separated and must correspond one-to-one.`;
+
+Theme_IDs and Second_Order_Themes must be semicolon-separated and correspond one-to-one.
+
+Example_Policies should contain the Document_IDs that contributed to the dimension (semicolon-separated).`;
 
 /**
  * Explicit JSON output contract appended to the system prompt. OpenAI-compatible
@@ -474,20 +499,6 @@ export function buildPromptView(activeMode: "staged" | "single"): PromptsDto {
         ],
       },
       {
-        title: "Per-document analysis — single call",
-        description:
-          "An alternative method that does the whole per-document analysis in one model call. Used only when 'single' mode is selected in settings.",
-        active: activeMode === "single",
-        sections: [
-          {
-            id: "single",
-            title: "Full per-document analysis (one call)",
-            description: "Everything from metadata to second-order themes in a single prompt, with the required output format.",
-            content: `${GIOIA_SYSTEM_PROMPT}\n\n${GIOIA_OUTPUT_CONTRACT}`,
-          },
-        ],
-      },
-      {
         title: "Case-study big-picture dimensions",
         description:
           "Run once per case study, across all its files, to group the themes into a handful of overarching dimensions.",
@@ -498,6 +509,20 @@ export function buildPromptView(activeMode: "staged" | "single"): PromptsDto {
             title: "Aggregate-dimension synthesis",
             description: "Groups the case study's distinct second-order themes into 4–8 big-picture dimensions.",
             content: CROSS_DOC_AGGREGATE_SYSTEM,
+          },
+        ],
+      },
+      {
+        title: "Per-document analysis — single call",
+        description:
+          "An alternative method that does the whole per-document analysis in one model call. Used only when 'single' mode is selected in settings.",
+        active: activeMode === "single",
+        sections: [
+          {
+            id: "single",
+            title: "Full per-document analysis (one call)",
+            description: "Everything from metadata to second-order themes in a single prompt, with the required output format.",
+            content: `${GIOIA_SYSTEM_PROMPT}\n\n${GIOIA_OUTPUT_CONTRACT}`,
           },
         ],
       },

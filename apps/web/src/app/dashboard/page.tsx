@@ -51,6 +51,9 @@ let jobSeq = 0;
 
 const EMPTY_CATALOG: CaseStudyCatalogDto = { regions: [], caseStudyTypes: [] };
 
+/** Remembers the last-selected case study across navigation / reloads. */
+const CASE_STUDY_KEY = "gioia:selectedCaseStudy";
+
 export default function DashboardPage() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [catalog, setCatalog] = useState<CaseStudyCatalogDto>(EMPTY_CATALOG);
@@ -69,7 +72,6 @@ export default function DashboardPage() {
   const [aggResult, setAggResult] = useState<CrossDocumentAggregateDto | null>(null);
   const [aggError, setAggError] = useState<string | null>(null);
   const [aggOpen, setAggOpen] = useState(false);
-  const [downloadingAgg, setDownloadingAgg] = useState(false);
   const [aggStatus, setAggStatus] = useState<CaseStudyAggregateStatusDto | null>(null);
 
   const caseStudyOptions = useMemo<CaseStudyOption[]>(
@@ -85,6 +87,33 @@ export default function DashboardPage() {
   );
 
   const selectedOption = caseStudyOptions.find((o) => o.id === caseStudyId) ?? null;
+
+  // Select a case study and remember it (persist to localStorage).
+  const selectCaseStudy = useCallback((id: string) => {
+    setCaseStudyId(id);
+    if (typeof window === "undefined") return;
+    if (id) window.localStorage.setItem(CASE_STUDY_KEY, id);
+    else window.localStorage.removeItem(CASE_STUDY_KEY);
+  }, []);
+
+  // Restore the previously-selected case study on mount.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const saved = window.localStorage.getItem(CASE_STUDY_KEY);
+    if (saved) setCaseStudyId(saved);
+  }, []);
+
+  // Once the catalog has loaded, drop a restored selection that no longer
+  // exists or is no longer accessible to this user.
+  useEffect(() => {
+    if (
+      caseStudyId &&
+      caseStudyOptions.length > 0 &&
+      !caseStudyOptions.some((o) => o.id === caseStudyId)
+    ) {
+      selectCaseStudy("");
+    }
+  }, [caseStudyOptions, caseStudyId, selectCaseStudy]);
 
   const refreshCatalog = useCallback(async () => {
     if (!authed) return;
@@ -221,17 +250,11 @@ export default function DashboardPage() {
     }
   }
 
-  async function downloadAggregateWorkbook() {
-    if (!aggResult) return;
-    setDownloadingAgg(true);
-    setAggError(null);
-    try {
-      await api.downloadAggregateWorkbook(aggResult);
-    } catch (e) {
-      setAggError(e instanceof Error ? e.message : "Download failed.");
-    } finally {
-      setDownloadingAgg(false);
-    }
+  // Download the FULL case-study codebook (all 9 sheets), which now includes the
+  // just-extracted aggregate dimensions — not just the aggregate-only export.
+  function downloadAggregateWorkbook() {
+    if (!caseStudyId) return;
+    window.location.href = caseStudyWorkbookDownloadUrl(caseStudyId);
   }
 
   if (!authed) return null;
@@ -304,7 +327,7 @@ export default function DashboardPage() {
             <select
               className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
               value={caseStudyId}
-              onChange={(e) => setCaseStudyId(e.target.value)}
+              onChange={(e) => selectCaseStudy(e.target.value)}
             >
               <option value="">Select a region &amp; case study…</option>
               {caseStudyOptions.map((o) => (
@@ -494,9 +517,8 @@ export default function DashboardPage() {
           result={aggResult}
           loading={aggregating}
           error={aggError}
-          downloading={downloadingAgg}
           onClose={() => setAggOpen(false)}
-          onDownload={() => void downloadAggregateWorkbook()}
+          onDownload={() => downloadAggregateWorkbook()}
         />
       )}
     </main>
@@ -577,14 +599,12 @@ function AggregateResultModal({
   result,
   loading,
   error,
-  downloading,
   onClose,
   onDownload,
 }: {
   result: CrossDocumentAggregateDto | null;
   loading: boolean;
   error: string | null;
-  downloading: boolean;
   onClose: () => void;
   onDownload: () => void;
 }) {
@@ -606,8 +626,8 @@ function AggregateResultModal({
             )}
           </div>
           <div className="flex flex-wrap gap-2 lg:justify-end">
-            <Button onClick={onDownload} disabled={!result || loading || downloading}>
-              {downloading ? "Preparing..." : "Download Excel"}
+            <Button onClick={onDownload} disabled={!result || loading}>
+              Download full codebook (.xlsx)
             </Button>
             <Button variant="outline" onClick={onClose}>
               Close
