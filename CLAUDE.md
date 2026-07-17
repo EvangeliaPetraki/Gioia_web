@@ -73,27 +73,33 @@ After `pnpm dev`: web → http://localhost:3000, API → http://localhost:3001/a
 
 ## Gioia policy-analysis dashboard (WP5.2)
 
-A dashboard at `/dashboard` (web) lets the user upload **policy PDFs**; the backend
-extracts the text and runs the full 11-step Gioia qualitative-coding pipeline defined in
-[apps/api/static/WP5.2 prompt.pdf](apps/api/static/), appending the result to a single
-master Excel codebook (`SkillResilience4EU_Gioia_Master_Codebook.xlsx`, name is fixed by
-the spec and must not change).
+A dashboard at `/dashboard` (web) lets the user upload **policy PDFs** into a **region-case-study**;
+the backend extracts the text and runs the Gioia qualitative-coding pipeline defined in
+[apps/api/static/WP5.2 prompt.pdf](apps/api/static/). **Per-document coding stops at second-order
+themes** — a single document does NOT get its own aggregate dimensions. Aggregate (theoretical)
+dimensions are synthesised once **per region-case-study**, across its selected files (Gioia Step 5
+at the case-study level), and persisted. The **codebook is per region-case-study** (its own 9-sheet
+Excel), not one global master.
 
 **Backend — `apps/api/src/analysis/`**
-- `analysis.controller.ts` — `POST /api/analysis/upload` (multipart `file`, PDF-only,
-  ≤25 MB), `GET /api/analysis/policies`, `GET /api/analysis/workbook` (downloads the xlsx).
+- `analysis.controller.ts` — `POST /api/analysis/upload` (multipart `file` + `regionCaseStudyId`,
+  PDF-only, ≤25 MB); per region-case-study: `GET …/region-case-studies/:id/policies`,
+  `…/codebook` (structured 9 sheets), `…/workbook` (xlsx download), `…/aggregate-status`
+  (staleness), `POST …/aggregate` (extract + persist). The old global `/policies`, `/codebook`,
+  `/workbook` are gone — the codebook is always scoped to a region-case-study.
 - `pdf.service.ts` — extracts text with `pdf-parse` (imported from `pdf-parse/lib/pdf-parse.js`
   to dodge its debug-mode bug); rejects image-only PDFs.
-- `gioia.service.ts` — runs the analysis, **streaming**, over two methods (chosen at runtime,
-  see `settings.service.ts`): **staged** (5 validated stages) or **single** (one model, one
-  call — the original method). Providers: **Anthropic** (Claude, via `@anthropic-ai/sdk`,
-  adaptive thinking + `MODEL_EFFORT` on the reasoning tier) and **Chutes** (open models, via the
-  OpenAI SDK at `https://llm.chutes.ai/v1`, `response_format:{type:"json_object"}` with a
-  no-JSON-mode fallback; output parsed tolerantly). In staged mode each stage runs on a *tier*
-  (`extract`/`concepts`/`reason`) resolved from the active **profile** — `claude`
-  (Sonnet/Haiku/Sonnet), `hybrid` (DeepSeek/Qwen/Opus), `chutes` (all open). Each stage receives
-  only the codebook levels it reuses (concepts→stage 2, themes→stage 3, dimensions→stage 4,
-  themes+dimensions→stage 5). In single mode the whole analysis runs on the chosen `singleModel`.
+- `gioia.service.ts` — runs the per-document analysis, **streaming**, over two methods (chosen at
+  runtime, see `settings.service.ts`): **staged** (4 validated stages — metadata/excerpts →
+  concepts → themes → synthesis/flags/memo) or **single** (one model, one call). Both **stop at
+  second-order themes**; neither produces per-document aggregate dimensions. Providers: **Anthropic**
+  (Claude, via `@anthropic-ai/sdk`, adaptive thinking + `MODEL_EFFORT` on the reasoning tier) and
+  **Chutes** (open models, via the OpenAI SDK at `https://llm.chutes.ai/v1`,
+  `response_format:{type:"json_object"}` with a no-JSON-mode fallback; output parsed tolerantly). In
+  staged mode each stage runs on a *tier* (`extract`/`concepts`/`reason`) resolved from the active
+  **profile** — `claude` (Sonnet/Haiku/Sonnet), `hybrid` (DeepSeek/Qwen/Opus), `chutes` (all open).
+  Each stage receives only the codebook levels it reuses (concepts→stage 2, themes→stage 3/synthesis).
+  `aggregateAcrossDocuments` (CROSS_DOC_AGGREGATE_SYSTEM) does the case-study-level Step 5.
 - `settings.service.ts` — the model selection is **DB-backed and admin-controlled from the UI**
   (`/admin/settings`), no longer env-driven. A singleton `AnalysisSetting` row holds
   `{ mode, profile, singleModel, effort }`; env (`PIPELINE_MODE`/`MODEL_PROFILE`/`MODEL_EFFORT`)
@@ -101,30 +107,93 @@ the spec and must not change).
   current settings + options (any user); `PATCH /api/analysis/settings` updates them
   (admin only, via `AdminGuard`). Selectable single-call models live in
   `SINGLE_MODEL_OPTIONS` (`packages/dto/src/analysis/analysis-settings.dto.ts`).
-- `codebook.service.ts` — `exceljs` read/create/append. Writes the 9 worksheets with the
-  spec's exact headers. **Rows are written positionally (by column order), not by key** —
-  exceljs does not restore column keys when a workbook is read back from disk, so key-based
-  `addRow({...})` silently misplaces data on the 2nd+ append. Duplicate `Document_ID`s are
-  re-prefixed (`_v2`). Also builds the "existing codebook" context fed back to the model for
-  cross-document code reuse (Step 7).
+  For transparency, `GET /api/analysis/prompts` (admin only) returns a **read-only** grouped view of
+  the system prompts (`buildPromptView` in `gioia.constants.ts`, so it can't drift from what the
+  pipeline actually sends); the admin page is `/admin/prompts`. Prompts are **not editable** — they
+  are coupled to the per-stage validators and the JSON output contract.
+- `codebook.service.ts` — persists each analysis (metadata/excerpts/first-order concepts/
+  second-order themes/summaries/memo — **no** per-doc aggregate or data-structure tables anymore)
+  and builds a **per-region-case-study** codebook: `buildSheets(docIds, aggregate)` fills the 6
+  document sheets from that case study's selected files, and the `Aggregate_Dimensions` +
+  `Gioia_Data_Structure` sheets from its persisted `CaseStudyAggregate` (empty until extracted).
+  `getConceptThemeStructure` rebuilds concept→theme rows from the DB; `save/getCaseStudyAggregate`
+  + `getAggregateStatus` handle persistence and staleness. **Rows are written positionally (by
+  column order), not by key.** Duplicate `Document_ID`s are re-prefixed (`_v2`). Also builds the
+  "existing codebook" context (concepts + themes, scoped to the case-study type) for reuse (Step 7).
 - `gioia.constants.ts` — the system prompt (faithful condensation of WP5.2), the output
   JSON schema, and the worksheet/column definitions (single source of truth for headers).
 
 **Shared types** live in `packages/dto/src/analysis/` (`GioiaAnalysis`, `AnalysisSummaryDto`,
-`PolicyListItemDto`, `GOVERNANCE_LEVELS`).
+`PolicyListItemDto`, `GOVERNANCE_LEVELS`; case-study contracts in `case-study.dto.ts`).
 
-**Cross-document aggregate dimensions** — admins can tick ≥2 documents in the dashboard table
-and `POST /api/analysis/aggregate` (admin only, `{ documentIds }`) synthesises aggregate
-dimensions across their distinct second-order themes: `CodebookService.getThemesForDocuments`
-gathers the themes, `GioiaService.aggregateAcrossDocuments` runs one reasoning-model call
-(`CROSS_DOC_AGGREGATE_SYSTEM`, using the active profile's `reason` model, or the single model)
-with the same validate/repair loop, returning `CrossDocumentAggregateDto`. Results render on the
-dashboard; nothing is persisted (it's an on-demand report).
+**Case-study organisation (per-region analysis)** — analysis is scoped by **case study**, not run
+globally. The model (`prisma/schema.prisma` + `case-study.service.ts`): `Region { country, name }`,
+`CaseStudyType { name }` (a **shared taxonomy** — tourism, transportation…), `RegionCaseStudy`
+(a region running a type — "Crete's transportation", the unit files are uploaded into), and
+`FileSelection` (which analyses each region's case study includes). An analysis
+(`AnalyzedDocument`) is keyed for reuse by **`(fileHash, caseStudyTypeId)`**: `fileHash` is the
+sha256 of the uploaded bytes; `documentId` stays the primary key so the five child tables are
+untouched. Reuse rule — the same file uploaded under the same case-study *type* (even for another
+region) is **linked, not re-analysed**; a different type re-analyses. `getExistingContext` and the
+new-theme count are scoped to `caseStudyTypeId` (Step-7 reuse is per case study, not global).
+Pre-existing rows are attached on boot to an "Unassigned (legacy)" region/case-study by
+`CodebookService.backfillLegacyCaseStudy` (their `fileHash` is synthesised as `legacy:{documentId}`).
+Admin CRUD + `GET /analysis/catalog` (the country→region→case-study tree) live on the analysis
+controller; the admin UI is `/admin/case-studies`. The dashboard picks a case study, uploads into
+it, lists only its files, and aggregates only its files.
 
-**Frontend — `apps/web/src/app/dashboard/page.tsx`** — drag-and-drop PDF upload, a
-sequential job queue (the shared codebook is updated one doc at a time), per-document counts
-+ summary, a download button, the analysed-policies table (admins get row checkboxes + the
-"Extract aggregate dimensions" action), and admin links to `/admin/users` and `/admin/settings`.
+**Access control (per-region ownership, many-to-many)** — a `Region` has **many owners** via the
+`RegionOwner` join table (`{ regionId, userId }`, composite PK). A non-admin sees and may use
+**only the case studies of regions they own**; admins see/do everything. A region with **no** owners
+is admin-only (the legacy region). Enforced on the backend, not just the UI: `getCatalog(viewer)`
+filters with `owners: { some: { userId } }`, and `resolveCaseStudyType`/`documentIdsFor` call
+`assertOwner(owners, viewer)` (403 otherwise), so upload / list / aggregate all reject a non-owner.
+The viewer comes from `@CurrentUser()` + `toViewer()` (`apps/api/src/auth/current-user.decorator.ts`),
+built from the `AuthGuard`-attached session user. Owners are editable after creation:
+`POST /analysis/regions` takes `userIds[]` (≥1), `PUT /analysis/regions/:id/owners` replaces the
+owner set (`SetRegionOwnersDto.userIds`, may be empty ⇒ admin-only), and `PATCH /analysis/regions/:id`
+renames a region / changes its country (`UpdateRegionDto`). The admin UI at
+`/admin/case-studies` picks owners (checkbox list from `authClient.admin.listUsers`) on create and, per
+region, has "Rename" and "Edit owners" editors plus Delete.
+
+**Case-study aggregate dimensions (persisted)** — an **owner or admin** extracts aggregate dimensions
+for a whole case study via `POST /api/analysis/region-case-studies/:id/aggregate` (access enforced in
+the service via `documentIdsFor` → `assertOwner`, not an `AdminGuard`), which resolves the
+region-case-study's selected files and synthesises across their distinct second-order themes.
+`CodebookService.getThemesForDocuments` gathers the themes, `GioiaService.aggregateAcrossDocuments`
+runs one reasoning-model call (`CROSS_DOC_AGGREGATE_SYSTEM`, using the active profile's `reason`
+model, or the single model) with the same validate/repair loop, returning `CrossDocumentAggregateDto`.
+The result is **persisted** to `CaseStudyAggregate` (keyed by region-case-study) and fills that case
+study's `Aggregate_Dimensions` + `Gioia_Data_Structure` codebook sheets. It is not auto-regenerated;
+`GET …/aggregate-status` reports `staleCount` (files **added or removed** since the last extraction)
+so the admin/owner re-runs it. (The older `POST /api/analysis/aggregate` with an explicit
+`{ documentIds }` list still exists but is unused by the UI.)
+
+**Excluding a file from a case study** — `DELETE /api/analysis/region-case-studies/:id/files/:documentId`
+(owner or admin; `CaseStudyService.removeSelection`) **unlinks the `FileSelection` only** — the
+`AnalyzedDocument` is never deleted, so a file shared with another region (same case-study type) stays
+intact there. Excluding makes the case study's persisted aggregate stale (the staleness check counts
+removals), so the dashboard nudges a re-extract. The dashboard file table has a per-row "Exclude".
+
+**Frontend — `apps/web/src/app/dashboard/page.tsx`** — pick a region-case-study, drag-and-drop PDF
+upload into it (sequential job queue), per-document counts + summary, and the "Extract aggregate
+dimensions" action (owner or admin) with a staleness hint. Header is grouped: **How it works** +
+account on the right, admin links collapsed into an **"Admin ▾"** dropdown (`Menu`, a dependency-free
+click-outside dropdown → `/admin/case-studies`, `/admin/users`, `/admin/settings`, `/admin/prompts`);
+the per-case-study **View full analysis** (`/codebook?cs=<id>`) + **Download codebook** buttons live on
+the Case-study card, not the global header.
+
+**Auth** — Better Auth (`apps/api/src/auth/auth.ts`) with the **admin** + **username** plugins,
+email/password, public sign-up disabled. Users sign in with **either username or email**: the login
+page (`apps/web/src/app/page.tsx`) sends the value to `signIn.email` if it contains "@", else
+`signIn.username`. The admin sets a `username` when creating a user at `/admin/users` (passed via
+`admin.createUser`'s `data:{username,displayUsername}`); the username plugin stores it lowercased +
+unique in `User.username` and keeps the original casing in `User.displayUsername`, so username login
+is case-insensitive. Pre-existing (email-only) users keep working via the email branch. From the same
+page an admin can **manage** each user — rename / change username (`admin.updateUser` with
+`data`), reset the password (`admin.setUserPassword`), and delete (`admin.removeUser`, blocked for
+their own account). All password fields use the shared `PasswordInput`
+(`apps/web/src/components/ui/password-input.tsx`) with a Show/Hide toggle.
 
 **Setup:** set `CHUTES_API_KEY` (+ `CHUTES_BASE_URL`) and, for the `claude`/`hybrid` profiles or
 a Claude single-model, `ANTHROPIC_API_KEY` in `apps/api/.env`. The active model selection is

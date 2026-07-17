@@ -1,12 +1,15 @@
 import type { GovernanceLevel } from "./gioia.dto";
 
-/** Per-level item counts returned after analysing a document. */
+/**
+ * Per-level item counts returned after analysing a document. A single document
+ * is coded up to second-order themes only (aggregate dimensions are produced at
+ * the case-study level), so there is no per-document aggregate-dimension count.
+ */
 export interface AnalysisCounts {
   excerpts: number;
   firstOrderConcepts: number;
   secondOrderThemes: number;
-  aggregateDimensions: number;
-  /** Second-order themes newly introduced by this document (not already in the master codebook). */
+  /** Second-order themes newly introduced by this document (not already in the case study). */
   newThemes: number;
 }
 
@@ -19,6 +22,11 @@ export interface AnalysisSummaryDto {
   policySummary: string;
   /** Filename of the master codebook the analysis was appended to. */
   workbookFilename: string;
+  /**
+   * True when this file had already been analysed under the same case-study type
+   * and the existing analysis was reused (linked) instead of re-running the model.
+   */
+  reused: boolean;
 }
 
 /** One row in the analysed-policies catalogue (GET /analysis/policies). */

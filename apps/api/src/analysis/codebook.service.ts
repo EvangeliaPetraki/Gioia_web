@@ -19,6 +19,25 @@ export interface AppendResult {
   newThemes: number;
 }
 
+/** Case-study scoping passed through when persisting an analysis. */
+export interface AppendScope {
+  caseStudyTypeId: string;
+  fileHash: string;
+}
+
+/** Per-level counts of an already-stored analysis (for the reuse response). */
+export interface DocumentCounts {
+  excerpts: number;
+  firstOrderConcepts: number;
+  secondOrderThemes: number;
+}
+
+// Legacy bucket that pre-existing (pre-case-study) analyses are attached to on
+// boot, so they remain visible in the dashboard tree.
+const LEGACY_COUNTRY = "Unassigned";
+const LEGACY_REGION = "Legacy documents";
+const LEGACY_CASE_STUDY = "Unassigned (legacy)";
+
 // The exported Excel mirrors the /codebook webpage column layout: the
 // document-scoped sheets lead with Document_ID, and the same redundant columns
 // the webpage hides are dropped from the export too.
@@ -33,6 +52,12 @@ const HIDDEN_COLUMNS: Record<string, string[]> = {
 };
 
 type Row = Record<string, string>;
+
+const splitIds = (s: string): string[] =>
+  (s ?? "")
+    .split(/[;,]/)
+    .map((x) => x.trim())
+    .filter(Boolean);
 
 
 /**
@@ -59,6 +84,11 @@ export class CodebookService implements OnModuleInit {
     } catch (e) {
       this.logger.warn(`Legacy codebook import skipped: ${e instanceof Error ? e.message : e}`);
     }
+    try {
+      await this.backfillLegacyCaseStudy();
+    } catch (e) {
+      this.logger.warn(`Legacy case-study backfill skipped: ${e instanceof Error ? e.message : e}`);
+    }
   }
 
   get filename(): string {
@@ -72,9 +102,14 @@ export class CodebookService implements OnModuleInit {
 
   // ── Reads ────────────────────────────────────────────────────────────────
 
-  /** Catalogue of analysed policies, most recently analysed first. */
-  async listPolicies(): Promise<PolicyListItemDto[]> {
+  /**
+   * Catalogue of analysed policies, most recently analysed first. When
+   * `documentIds` is given, only those documents are returned (used to list one
+   * region-case-study's selected files).
+   */
+  async listPolicies(documentIds?: string[]): Promise<PolicyListItemDto[]> {
     const docs = await this.prisma.analyzedDocument.findMany({
+      where: documentIds ? { documentId: { in: documentIds } } : undefined,
       orderBy: [{ createdAt: "desc" }, { documentId: "desc" }],
     });
     return docs.map((d) => ({
@@ -113,31 +148,123 @@ export class CodebookService implements OnModuleInit {
     }));
   }
 
-  /** Gioia data-structure rows for the selected documents, preserving document row order. */
-  async getGioiaStructureForDocuments(documentIds: string[]): Promise<
+  /**
+   * The concept → theme structure for the selected documents, rebuilt from the
+   * stored first-order concepts and second-order themes (one row per distinct
+   * concept per document). Per-document analysis stops at themes, so there is no
+   * per-document aggregate dimension here — that is added at the case-study level.
+   */
+  async getConceptThemeStructure(documentIds: string[]): Promise<
     {
       documentId: string;
       conceptId: string;
       firstOrderConcept: string;
       themeId: string;
       secondOrderTheme: string;
-      sourceAggregateId: string;
-      sourceAggregateDimension: string;
     }[]
   > {
-    const rows = await this.prisma.gioiaStructureRow.findMany({
-      where: { documentId: { in: documentIds } },
-      orderBy: [{ documentId: "asc" }, { orderIndex: "asc" }],
+    const [concepts, themes] = await Promise.all([
+      this.prisma.firstOrderConcept.findMany({
+        where: { documentId: { in: documentIds } },
+        orderBy: [{ documentId: "asc" }, { orderIndex: "asc" }],
+      }),
+      this.prisma.secondOrderTheme.findMany({
+        where: { documentId: { in: documentIds } },
+        orderBy: [{ documentId: "asc" }, { orderIndex: "asc" }],
+      }),
+    ]);
+
+    // Map each (document, Concept_ID) to the first theme that groups it.
+    const themeByDocConcept = new Map<string, { themeId: string; secondOrderTheme: string }>();
+    for (const t of themes) {
+      for (const cid of splitIds(t.firstOrderConceptIds)) {
+        const key = `${t.documentId}::${cid}`;
+        if (!themeByDocConcept.has(key)) {
+          themeByDocConcept.set(key, { themeId: t.themeId, secondOrderTheme: t.secondOrderTheme });
+        }
+      }
+    }
+
+    const seen = new Set<string>();
+    const rows: {
+      documentId: string;
+      conceptId: string;
+      firstOrderConcept: string;
+      themeId: string;
+      secondOrderTheme: string;
+    }[] = [];
+    for (const c of concepts) {
+      const key = `${c.documentId}::${c.conceptId}`;
+      if (seen.has(key)) continue; // one row per first-order concept (type) per document
+      seen.add(key);
+      const t = themeByDocConcept.get(key);
+      rows.push({
+        documentId: c.documentId,
+        conceptId: c.conceptId,
+        firstOrderConcept: c.firstOrderConcept,
+        themeId: t?.themeId ?? "",
+        secondOrderTheme: t?.secondOrderTheme ?? "",
+      });
+    }
+    return rows;
+  }
+
+  // ── Case-study aggregate (persisted per region-case-study) ─────────────────
+
+  /** Save/replace the aggregate synthesis for one region-case-study. */
+  async saveCaseStudyAggregate(
+    regionCaseStudyId: string,
+    result: CrossDocumentAggregateDto,
+  ): Promise<void> {
+    const data = {
+      documentIds: result.documentIds.join(","),
+      themeCount: result.themeCount,
+      dimensions: JSON.stringify(result.dimensions),
+      structureRows: JSON.stringify(result.structureRows),
+      generatedAt: new Date(),
+    };
+    await this.prisma.caseStudyAggregate.upsert({
+      where: { regionCaseStudyId },
+      create: { regionCaseStudyId, ...data },
+      update: data,
     });
-    return rows.map((r) => ({
-      documentId: r.documentId,
-      conceptId: r.conceptId,
-      firstOrderConcept: r.firstOrderConcept,
-      themeId: r.themeId,
-      secondOrderTheme: r.secondOrderTheme,
-      sourceAggregateId: r.aggregateId,
-      sourceAggregateDimension: r.aggregateDimension,
-    }));
+  }
+
+  /** The persisted aggregate for a region-case-study, or null if never extracted. */
+  async getCaseStudyAggregate(regionCaseStudyId: string): Promise<CrossDocumentAggregateDto | null> {
+    const row = await this.prisma.caseStudyAggregate.findUnique({ where: { regionCaseStudyId } });
+    if (!row) return null;
+    return {
+      documentIds: splitIds(row.documentIds),
+      themeCount: row.themeCount,
+      dimensions: JSON.parse(row.dimensions) as CrossDocumentAggregateDto["dimensions"],
+      structureRows: JSON.parse(row.structureRows) as CrossDocumentAggregateDto["structureRows"],
+    };
+  }
+
+  /**
+   * Freshness of a region-case-study's aggregate vs its current file selection:
+   * `generatedAt` and how many files differ from the snapshot the aggregate was
+   * built from — counting both **additions** and **removals** (0 ⇒ up to date;
+   * null generatedAt ⇒ never run).
+   */
+  async getAggregateStatus(
+    regionCaseStudyId: string,
+    currentDocIds: string[],
+  ): Promise<{ generatedAt: string | null; documentCount: number; staleCount: number }> {
+    const row = await this.prisma.caseStudyAggregate.findUnique({ where: { regionCaseStudyId } });
+    if (!row) {
+      return { generatedAt: null, documentCount: currentDocIds.length, staleCount: currentDocIds.length };
+    }
+    const snapshot = new Set(splitIds(row.documentIds));
+    const current = new Set(currentDocIds);
+    const added = currentDocIds.filter((id) => !snapshot.has(id)).length;
+    const removed = [...snapshot].filter((id) => !current.has(id)).length;
+    return {
+      generatedAt: row.generatedAt.toISOString(),
+      documentCount: currentDocIds.length,
+      staleCount: added + removed,
+    };
   }
 
   /** First-order concepts and second-order themes for one document. */
@@ -183,10 +310,19 @@ export class CodebookService implements OnModuleInit {
     return updated.note;
   }
 
-  /** The whole codebook as structured data (one entry per worksheet), built from the DB. */
-  async getWorkbookData(): Promise<CodebookDto> {
-    const sheets = await this.buildSheets();
-    return { filename: this.filename, sheets };
+  /**
+   * One region-case-study's codebook as structured data (one entry per
+   * worksheet). Built from that case study's selected `docIds`; the
+   * Aggregate_Dimensions and Gioia_Data_Structure sheets are filled from its
+   * persisted case-study aggregate (empty until it has been extracted).
+   */
+  async getWorkbookData(
+    docIds: string[],
+    aggregate: CrossDocumentAggregateDto | null,
+    filename: string,
+  ): Promise<CodebookDto> {
+    const sheets = await this.buildSheets(docIds, aggregate);
+    return { filename, sheets };
   }
 
   /**
@@ -210,12 +346,14 @@ export class CodebookService implements OnModuleInit {
   }
 
   /**
-   * Build the downloadable Excel from the DB and return it as a Buffer. When
-   * `docIds` is given, only those documents are included (filtered export).
+   * Build one region-case-study's downloadable Excel (its selected `docIds` plus
+   * its persisted aggregate) and return it as a Buffer.
    */
-  async generateWorkbookBuffer(docIds?: string[]): Promise<Buffer> {
-    const filter = docIds ? new Set(docIds) : undefined;
-    const sheets = (await this.buildSheets(filter)).map((s) => this.applyWebpageLayout(s));
+  async generateWorkbookBuffer(
+    docIds: string[],
+    aggregate: CrossDocumentAggregateDto | null,
+  ): Promise<Buffer> {
+    const sheets = (await this.buildSheets(docIds, aggregate)).map((s) => this.applyWebpageLayout(s));
     const wb = new Workbook();
     for (const def of sheets) {
       const ws = wb.addWorksheet(def.name);
@@ -296,8 +434,9 @@ export class CodebookService implements OnModuleInit {
    * ids + first-order concepts + second-order themes + aggregate dimensions), so
    * each pipeline stage can be handed only the level it reuses (Step 7).
    */
-  async getExistingContext(): Promise<ExistingContext> {
+  async getExistingContext(caseStudyTypeId: string): Promise<ExistingContext> {
     const docs = await this.prisma.analyzedDocument.findMany({
+      where: { caseStudyTypeId },
       select: { documentId: true },
       orderBy: { createdAt: "asc" },
     });
@@ -305,28 +444,32 @@ export class CodebookService implements OnModuleInit {
       return { documentIds: [], concepts: [], themes: [], dimensions: [], isEmpty: true };
     }
 
-    const [concepts, themes, dimensions] = await Promise.all([
-      this.distinctPairs("firstOrderConcept", "conceptId", "firstOrderConcept"),
-      this.distinctPairs("secondOrderTheme", "themeId", "secondOrderTheme"),
-      this.distinctPairs("aggregateDimension", "aggregateId", "aggregateDimension"),
+    const docIds = docs.map((d) => d.documentId);
+    const [concepts, themes] = await Promise.all([
+      this.distinctPairs("firstOrderConcept", "conceptId", "firstOrderConcept", docIds),
+      this.distinctPairs("secondOrderTheme", "themeId", "secondOrderTheme", docIds),
     ]);
 
+    // Per-document coding stops at themes, so there are no per-document aggregate
+    // dimensions to reuse — that vocabulary lives at the case-study level.
     return {
-      documentIds: docs.map((d) => d.documentId),
+      documentIds: docIds,
       concepts,
       themes,
-      dimensions,
+      dimensions: [],
       isEmpty: false,
     };
   }
 
   private async distinctPairs(
-    model: "firstOrderConcept" | "secondOrderTheme" | "aggregateDimension",
+    model: "firstOrderConcept" | "secondOrderTheme",
     idField: string,
     labelField: string,
+    docIds: string[],
   ): Promise<string[]> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rows: Record<string, string>[] = await (this.prisma[model] as any).findMany({
+      where: { documentId: { in: docIds } },
       orderBy: { id: "asc" },
     });
     const seen = new Map<string, string>();
@@ -339,8 +482,25 @@ export class CodebookService implements OnModuleInit {
 
   // ── Writes ───────────────────────────────────────────────────────────────
 
-  /** Persist a completed analysis into the database. */
-  async append(analysis: GioiaAnalysis, sourceFile: string): Promise<AppendResult> {
+  /** The already-stored analysis of this file under this case-study type, if any. */
+  async findByHash(fileHash: string, caseStudyTypeId: string) {
+    return this.prisma.analyzedDocument.findFirst({
+      where: { fileHash, caseStudyTypeId },
+    });
+  }
+
+  /** Per-level counts for an already-stored analysis. */
+  async countsFor(documentId: string): Promise<DocumentCounts> {
+    const [excerpts, firstOrderConcepts, secondOrderThemes] = await Promise.all([
+      this.prisma.rawExcerpt.count({ where: { documentId } }),
+      this.prisma.firstOrderConcept.count({ where: { documentId } }),
+      this.prisma.secondOrderTheme.count({ where: { documentId } }),
+    ]);
+    return { excerpts, firstOrderConcepts, secondOrderThemes };
+  }
+
+  /** Persist a completed analysis into the database, scoped to a case-study type. */
+  async append(analysis: GioiaAnalysis, sourceFile: string, scope: AppendScope): Promise<AppendResult> {
     // Ensure a unique Document_ID; re-prefix doc-scoped IDs if it collides.
     const existing = await this.prisma.analyzedDocument.findMany({ select: { documentId: true } });
     const existingDocIds = new Set(existing.map((d) => d.documentId));
@@ -353,11 +513,18 @@ export class CodebookService implements OnModuleInit {
       analysis = this.rePrefix(analysis, original, documentId);
     }
 
+    // "New" themes are judged within the case study, matching the scoped reuse
+    // context the model was given.
     const priorThemeIds = new Set(
-      (await this.prisma.secondOrderTheme.findMany({ select: { themeId: true } })).map((t) => t.themeId),
+      (
+        await this.prisma.secondOrderTheme.findMany({
+          where: { document: { caseStudyTypeId: scope.caseStudyTypeId } },
+          select: { themeId: true },
+        })
+      ).map((t) => t.themeId),
     );
 
-    await this.persist(analysis, documentId, sourceFile);
+    await this.persist(analysis, documentId, sourceFile, scope);
 
     const newThemes = analysis.second_order_themes.filter((t) => !priorThemeIds.has(t.Theme_ID)).length;
     this.logger.log(`Stored ${documentId} in the database.`);
@@ -365,7 +532,12 @@ export class CodebookService implements OnModuleInit {
   }
 
   /** Insert one document and all its child rows in a single transaction. */
-  private async persist(analysis: GioiaAnalysis, documentId: string, sourceFile: string): Promise<void> {
+  private async persist(
+    analysis: GioiaAnalysis,
+    documentId: string,
+    sourceFile: string,
+    scope: AppendScope,
+  ): Promise<void> {
     const meta = analysis.policy_metadata;
     const dateAnalysed = new Date().toISOString().slice(0, 10);
 
@@ -380,6 +552,8 @@ export class CodebookService implements OnModuleInit {
           issuingActor: meta.Issuing_Actor ?? "",
           policyType: meta.Policy_Type ?? "",
           sourceFile,
+          fileHash: scope.fileHash,
+          caseStudyTypeId: scope.caseStudyTypeId,
           dateAnalysed,
           policySummary: analysis.policy_summary ?? "",
           refinementSummary: analysis.refinement_summary ?? "",
@@ -421,30 +595,6 @@ export class CodebookService implements OnModuleInit {
           exampleQuote: t.Example_Quote ?? "",
         })),
       }),
-      this.prisma.aggregateDimension.createMany({
-        data: analysis.aggregate_dimensions.map((a, i) => ({
-          documentId,
-          orderIndex: i,
-          aggregateId: a.Aggregate_ID ?? "",
-          themeIds: a.Theme_IDs ?? "",
-          secondOrderThemes: a.Second_Order_Themes ?? "",
-          aggregateDimension: a.Aggregate_Dimension ?? "",
-          description: a.Description ?? "",
-          examplePolicies: a.Example_Policies || documentId,
-        })),
-      }),
-      this.prisma.gioiaStructureRow.createMany({
-        data: analysis.gioia_data_structure.map((g, i) => ({
-          documentId,
-          orderIndex: i,
-          conceptId: g.Concept_ID ?? "",
-          firstOrderConcept: g.First_Order_Concept ?? "",
-          themeId: g.Theme_ID ?? "",
-          secondOrderTheme: g.Second_Order_Theme ?? "",
-          aggregateId: g.Aggregate_ID ?? "",
-          aggregateDimension: g.Aggregate_Dimension ?? "",
-        })),
-      }),
     ]);
   }
 
@@ -460,19 +610,22 @@ export class CodebookService implements OnModuleInit {
         Concept_Instance_ID: swap(c.Concept_Instance_ID),
         Raw_ID: swap(c.Raw_ID),
       })),
-      aggregate_dimensions: analysis.aggregate_dimensions.map((a) => ({
-        ...a,
-        Example_Policies: swap(a.Example_Policies),
-      })),
     };
   }
 
   // ── Codebook view (DB → sheets) ────────────────────────────────────────────
 
-  /** Build the 9 worksheet views (columns + positional rows) from the DB. */
-  private async buildSheets(docIds?: Set<string>): Promise<CodebookDto["sheets"]> {
-    const where = docIds ? { documentId: { in: [...docIds] } } : undefined;
-    const [docs, raw, foc, sot, agg, gds] = await Promise.all([
+  /**
+   * Build the 9 worksheet views (columns + positional rows) for one region-case-
+   * study: the document-scoped sheets from `docIds`, and the Aggregate_Dimensions
+   * + Gioia_Data_Structure sheets from the persisted case-study `aggregate`.
+   */
+  private async buildSheets(
+    docIds: string[],
+    aggregate: CrossDocumentAggregateDto | null,
+  ): Promise<CodebookDto["sheets"]> {
+    const where = { documentId: { in: docIds } };
+    const [docs, raw, foc, sot] = await Promise.all([
       this.prisma.analyzedDocument.findMany({
         where,
         orderBy: [{ createdAt: "desc" }, { documentId: "desc" }],
@@ -480,8 +633,6 @@ export class CodebookService implements OnModuleInit {
       this.prisma.rawExcerpt.findMany({ where }),
       this.prisma.firstOrderConcept.findMany({ where }),
       this.prisma.secondOrderTheme.findMany({ where }),
-      this.prisma.aggregateDimension.findMany({ where }),
-      this.prisma.gioiaStructureRow.findMany({ where }),
     ]);
 
     const order = new Map(docs.map((d, i) => [d.documentId, i]));
@@ -552,7 +703,7 @@ export class CodebookService implements OnModuleInit {
       ),
       meta(
         SHEETS.AggregateDimensions,
-        sort(agg).map((a) => ({
+        (aggregate?.dimensions ?? []).map((a) => ({
           Aggregate_ID: a.aggregateId,
           Theme_ID: a.themeIds,
           Second_Order_Themes: a.secondOrderThemes,
@@ -563,7 +714,7 @@ export class CodebookService implements OnModuleInit {
       ),
       meta(
         SHEETS.GioiaDataStructure,
-        sort(gds).map((g) => ({
+        (aggregate?.structureRows ?? []).map((g) => ({
           Document_ID: g.documentId,
           Concept_ID: g.conceptId,
           First_Order_Concept: g.firstOrderConcept,
@@ -628,27 +779,17 @@ export class CodebookService implements OnModuleInit {
     const metaRows = this.readRows(wb.getWorksheet(SHEETS.PolicyMetadata.name));
     if (metaRows.length === 0) return 0;
 
-    const docIds = metaRows.map((m) => m.Document_ID);
     const byDoc = <T extends Row>(rows: T[]) => (id: string) => rows.filter((r) => r.Document_ID === id);
 
     const raw = byDoc(this.readRows(wb.getWorksheet(SHEETS.RawDataExtraction.name)));
     const foc = byDoc(this.readRows(wb.getWorksheet(SHEETS.FirstOrderConcepts.name)));
     const sot = byDoc(this.readRows(wb.getWorksheet(SHEETS.SecondOrderThemes.name)));
-    const gds = byDoc(this.readRows(wb.getWorksheet(SHEETS.GioiaDataStructure.name)));
     const summaries = this.readRows(wb.getWorksheet(SHEETS.PolicySummary.name));
     const refinements = this.readRows(wb.getWorksheet(SHEETS.RefinementSummary.name));
     const memos = this.readRows(wb.getWorksheet(SHEETS.ResearchQuestionMemo.name));
-    const aggAll = this.readRows(wb.getWorksheet(SHEETS.AggregateDimensions.name));
 
     const lookup = (rows: Row[], id: string, field: string) =>
       rows.find((r) => r.Document_ID === id)?.[field] ?? "";
-
-    // Attribute each aggregate row to the first document it references.
-    const aggByDoc = new Map<string, Row[]>();
-    for (const a of aggAll) {
-      const owner = docIds.find((id) => (a.Example_Policies ?? "").includes(id)) ?? docIds[0];
-      (aggByDoc.get(owner) ?? aggByDoc.set(owner, []).get(owner)!).push(a);
-    }
 
     for (const m of metaRows) {
       const id = m.Document_ID;
@@ -704,33 +845,56 @@ export class CodebookService implements OnModuleInit {
             exampleQuote: t.Example_Quote ?? "",
           })),
         }),
-        this.prisma.aggregateDimension.createMany({
-          data: (aggByDoc.get(id) ?? []).map((a, i) => ({
-            documentId: id,
-            orderIndex: i,
-            aggregateId: a.Aggregate_ID ?? "",
-            themeIds: a.Theme_ID ?? "",
-            secondOrderThemes: a.Second_Order_Themes ?? "",
-            aggregateDimension: a.Aggregate_Dimension ?? "",
-            description: a.Description ?? "",
-            examplePolicies: a.Example_Policies ?? "",
-          })),
-        }),
-        this.prisma.gioiaStructureRow.createMany({
-          data: gds(id).map((g, i) => ({
-            documentId: id,
-            orderIndex: i,
-            conceptId: g.Concept_ID ?? "",
-            firstOrderConcept: g.First_Order_Concept ?? "",
-            themeId: g.Theme_ID ?? "",
-            secondOrderTheme: g.Second_Order_Theme ?? "",
-            aggregateId: g.Aggregate_ID ?? "",
-            aggregateDimension: g.Aggregate_Dimension ?? "",
-          })),
-        }),
       ]);
     }
 
     return metaRows.length;
+  }
+
+  /**
+   * Attach any pre-case-study analyses (caseStudyTypeId = null) to a single
+   * "legacy" region/case-study so they stay visible and queryable. Their
+   * fileHash is synthesised from the Document_ID (the original bytes are gone),
+   * which is unique and so satisfies the (fileHash, caseStudyTypeId) index.
+   */
+  private async backfillLegacyCaseStudy(): Promise<void> {
+    const orphans = await this.prisma.analyzedDocument.findMany({
+      where: { caseStudyTypeId: null },
+      select: { documentId: true },
+    });
+    if (orphans.length === 0) return;
+
+    const type = await this.prisma.caseStudyType.upsert({
+      where: { name: LEGACY_CASE_STUDY },
+      create: { name: LEGACY_CASE_STUDY },
+      update: {},
+    });
+    const region = await this.prisma.region.upsert({
+      where: { country_name: { country: LEGACY_COUNTRY, name: LEGACY_REGION } },
+      create: { country: LEGACY_COUNTRY, name: LEGACY_REGION },
+      update: {},
+    });
+    const rcs = await this.prisma.regionCaseStudy.upsert({
+      where: { regionId_caseStudyTypeId: { regionId: region.id, caseStudyTypeId: type.id } },
+      create: { regionId: region.id, caseStudyTypeId: type.id },
+      update: {},
+    });
+
+    for (const o of orphans) {
+      await this.prisma.$transaction([
+        this.prisma.analyzedDocument.update({
+          where: { documentId: o.documentId },
+          data: { caseStudyTypeId: type.id, fileHash: `legacy:${o.documentId}` },
+        }),
+        this.prisma.fileSelection.upsert({
+          where: {
+            regionCaseStudyId_documentId: { regionCaseStudyId: rcs.id, documentId: o.documentId },
+          },
+          create: { regionCaseStudyId: rcs.id, documentId: o.documentId, originalFilename: "" },
+          update: {},
+        }),
+      ]);
+    }
+    this.logger.log(`Backfilled ${orphans.length} legacy document(s) onto "${LEGACY_CASE_STUDY}".`);
   }
 }

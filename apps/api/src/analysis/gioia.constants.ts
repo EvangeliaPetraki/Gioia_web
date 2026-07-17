@@ -1,4 +1,5 @@
 import { GOVERNANCE_LEVELS } from "@gioia/dto";
+import type { PromptsDto } from "@gioia/dto";
 
 /** The exact master-codebook filename mandated by WP5.2 (must not be renamed). */
 export const CODEBOOK_FILENAME = "SkillResilience4EU_Gioia_Master_Codebook.xlsx";
@@ -203,52 +204,6 @@ export const GIOIA_OUTPUT_SCHEMA = {
         ],
       },
     },
-    aggregate_dimensions: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          Aggregate_ID: str,
-          Theme_IDs: str,
-          Second_Order_Themes: str,
-          Aggregate_Dimension: str,
-          Description: str,
-          Example_Policies: str,
-        },
-        required: [
-          "Aggregate_ID",
-          "Theme_IDs",
-          "Second_Order_Themes",
-          "Aggregate_Dimension",
-          "Description",
-          "Example_Policies",
-        ],
-      },
-    },
-    gioia_data_structure: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          Concept_ID: str,
-          First_Order_Concept: str,
-          Theme_ID: str,
-          Second_Order_Theme: str,
-          Aggregate_ID: str,
-          Aggregate_Dimension: str,
-        },
-        required: [
-          "Concept_ID",
-          "First_Order_Concept",
-          "Theme_ID",
-          "Second_Order_Theme",
-          "Aggregate_ID",
-          "Aggregate_Dimension",
-        ],
-      },
-    },
     policy_summary: str,
     refinement_summary: str,
     research_question_memo: {
@@ -263,8 +218,6 @@ export const GIOIA_OUTPUT_SCHEMA = {
     "raw_data_extraction",
     "first_order_concepts",
     "second_order_themes",
-    "aggregate_dimensions",
-    "gioia_data_structure",
     "policy_summary",
     "refinement_summary",
     "research_question_memo",
@@ -280,34 +233,32 @@ How do labour-market and twin-transition policies across Europe construct and op
 Subsidiary questions concern: (1) how policy actors frame labour-market challenges of the twin transition; (2) which policy instruments and implementation mechanisms drive labour-market adaptation; (3) how responsibilities and coordination are distributed across EU, national and regional governance levels; (4) how policies address social inclusion and uneven impacts across regions, sectors and vulnerable groups; (5) what implementation gaps, governance constraints or design tensions exist.
 
 METHODOLOGICAL PRINCIPLES
-- Inductive Gioia coding: raw excerpts -> first-order concepts (informant-centric, close to policy wording) -> second-order themes (researcher-centric) -> aggregate dimensions (theoretical).
+- Inductive Gioia coding for a SINGLE document stops at second-order themes: raw excerpts -> first-order concepts (informant-centric, close to policy wording) -> second-order themes (researcher-centric). Do NOT produce aggregate dimensions here — aggregate (theoretical) dimensions are synthesised separately, once, across a whole case study's set of documents.
 - Preserve informant/policy language; employ gradual abstraction; keep transparent links between quotes and theory; do not collapse meaningful variation across governance levels; do not force excerpts into pre-existing categories when conceptual novelty is present.
 - Sensitizing concepts (multi-level governance, policy coherence, place sensitivity, institutional capacity, labour-market adjustment, left-behind risk) are interpretive aids for SECOND-ORDER coding and cross-case comparison ONLY. They must NOT appear as first-order concepts unless those exact terms appear verbatim in the policy text.
 
 LANGUAGE POLICY
 First detect the document's original language. The data that stays close to the source stays in THAT ORIGINAL LANGUAGE; all researcher-generated, abstracted text is in ENGLISH.
 - In the ORIGINAL LANGUAGE (do not translate): every verbatim excerpt/quote — raw_data_extraction.Excerpt_Text, first_order_concepts.Excerpt_Text and second_order_themes.Example_Quote — AND every first-order concept label — first_order_concepts.First_Order_Concept, the First_Order_Concepts list in second_order_themes, and gioia_data_structure.First_Order_Concept.
-- In ENGLISH: all policy_metadata; all notes and flags (Initial_Notes, Coding_Notes, Analytical_Flags); all second-order themes (Second_Order_Theme) and the Second_Order_Themes lists in aggregate_dimensions; all aggregate_dimensions (Aggregate_Dimension, Description); and policy_summary, refinement_summary and research_question_memo.
+- In ENGLISH: all policy_metadata; all notes and flags (Initial_Notes, Coding_Notes, Analytical_Flags); all second-order themes (Second_Order_Theme); and policy_summary, refinement_summary and research_question_memo.
 - Keep IDs and Section_Page as-is. If the document is already in English, every field is simply in English.
 
 ANALYSIS STEPS (produce all of the following for the attached policy document)
 STEP 1 - Metadata: Policy_Name, Country_or_Region, Governance_Level (one of the allowed values), Policy_Year, Issuing_Actor, Policy_Type. Create Document_ID mirroring the uploaded file name where given (formats like EU_01, DE_NAT_01, IT_REG_01).
 STEP 2 - Raw extraction: 25-40 relevant excerpts (exact verbatim wording in the document's original language, 1-3 sentences each) on twin transition & labour-market change, adjustment strategies, skills/reskilling/upskilling, employment disruption/restructuring/job creation, governance coordination, territorial inequality/regional vulnerability/left-behind places, and ambition vs delivery. Include section/page where possible. Give each a Raw_ID of the form {Document_ID}_RAW_001. In Initial_Notes flag the analytical issue (Labour-market challenge framing / Adjustment strategy / Governance coordination / Coherence signal / Territorial-place-sensitive response / Left-behind risk / Implementation constraint / Other). Avoid generic climate/digital ambition statements unless tied to labour markets, adjustment, governance or territory.
 STEP 3 - First-order concepts: 40-80 total. For each, copy the source excerpt into Excerpt_Text, give Concept_Instance_ID of the form {Document_ID}_FOCINST_001 and a Concept_ID of the form FOC_1 identifying the concept itself. The concept is a short phrase (3-8 words) close to policy wording, written in the document's original language; 1-3 concepts per excerpt. Do NOT use abstract analytical labels (policy coherence, place sensitivity, multi-level governance, institutional complementarity) unless those exact terms appear in the policy text.
-STEP 4 - Second-order themes: 10-20. Group semantically close first-order concepts; list their concepts (semicolon-separated, in the original language, matching the first-order labels) and their Concept_IDs (semicolon-separated); label each group with a researcher-centric theme IN ENGLISH; give Theme_ID of the form THM_1 and an Example_Quote (verbatim, in the original language).
-STEP 5 - Aggregate dimensions: 4-8. Group semantically close themes; list the themes (semicolon-separated) in Second_Order_Themes and their Theme_IDs (semicolon-separated) in Theme_IDs; label each group with an Aggregate_Dimension; give Aggregate_ID of the form AGG_1, a Description, and Example_Policies (the Document_ID).
-STEP 6 - Gioia data structure: one row per first-order concept linking Concept_ID + First_Order_Concept -> Theme_ID + Second_Order_Theme -> Aggregate_ID + Aggregate_Dimension.
-STEP 7 - Cross-document comparison: compare with the existing master codebook supplied in the user message. Reuse existing Concept_IDs only where wording and meaning are highly similar; prefer reusing existing Theme_IDs and Aggregate_IDs where conceptual overlap is substantial, creating new ones only for genuinely distinct patterns. Record applicable flags in Analytical_Flags: [TENSION], [ABSENCE], [IMPLEMENTATION LOGIC: WEAK OPERATIONALISATION], [PLACE-SENSITIVE SIGNAL], [TERRITORIAL LOGIC: LIMITED DIFFERENTIATION]. Do not infer content not explicitly present in the policy.
+STEP 4 - Second-order themes: 10-20. Group semantically close first-order concepts; list their concepts (semicolon-separated, in the original language, matching the first-order labels) and their Concept_IDs (semicolon-separated); label each group with a researcher-centric theme IN ENGLISH; give Theme_ID of the form THM_1 and an Example_Quote (verbatim, in the original language). This is the FINAL coding level for a single document — do NOT produce aggregate dimensions or a Gioia data structure.
+STEP 7 - Cross-document comparison: compare with the existing codebook supplied in the user message. Reuse existing Concept_IDs only where wording and meaning are highly similar; prefer reusing existing Theme_IDs where conceptual overlap is substantial, creating new ones only for genuinely distinct patterns. Record applicable flags in Analytical_Flags: [TENSION], [ABSENCE], [IMPLEMENTATION LOGIC: WEAK OPERATIONALISATION], [PLACE-SENSITIVE SIGNAL], [TERRITORIAL LOGIC: LIMITED DIFFERENTIATION]. Do not infer content not explicitly present in the policy.
 STEP 8 - Policy summary: 150-250 words covering focus, labour-market framing, adjustment mechanisms, skills/workforce strategy, governance approach, place sensitivity, uneven-impact/left-behind acknowledgement, and notable coherence strengths/tensions/gaps. Discuss any flags raised.
-STEP 9 - Refinement summary: 150-200 words explaining how/why concepts, themes and dimensions were refined for consistency, and justifying any newly introduced codes.
+STEP 9 - Refinement summary: 150-200 words explaining how/why concepts and themes were refined for consistency, and justifying any newly introduced codes.
 STEP 10 - Research-question memo: 150-250 words addressing the main and subsidiary questions for this document, including any flags.
 
 NON-NEGOTIABLE RULES
 - Every cell must contain substantive analytical content. Never use placeholder text ("TBD", "N/A", "Concepts", etc.). If something is genuinely undeterminable, use an empty string.
-- Every excerpt must link to >=1 first-order concept; every first-order concept to a second-order theme; every theme to an aggregate dimension. No duplicate IDs within this document.
+- Every excerpt must link to >=1 first-order concept; every first-order concept to a second-order theme. No duplicate IDs within this document.
 - Use IDs exactly in the prescribed formats and keep them internally consistent across the steps.
 
-Each ID prefix must use the Document_ID you assign in policy_metadata. In aggregate_dimensions, Theme_IDs holds the semicolon-separated second-order Theme_IDs.`;
+Each ID prefix must use the Document_ID you assign in policy_metadata.`;
 
 /**
  * System prompt for cross-document aggregate-dimension synthesis (Step 5 applied
@@ -348,13 +299,11 @@ Respond with a SINGLE JSON object and nothing else — no markdown, no code fenc
   "raw_data_extraction": [ { "Raw_ID": "", "Section_Page": "", "Excerpt_Text": "", "Initial_Notes": "", "Analytical_Flags": "" } ],
   "first_order_concepts": [ { "Concept_Instance_ID": "", "Concept_ID": "", "Raw_ID": "", "Excerpt_Text": "", "First_Order_Concept": "", "Coding_Notes": "" } ],
   "second_order_themes": [ { "Theme_ID": "", "First_Order_Concept_IDs": "", "First_Order_Concepts": "", "Second_Order_Theme": "", "Example_Quote": "" } ],
-  "aggregate_dimensions": [ { "Aggregate_ID": "", "Theme_IDs": "", "Second_Order_Themes": "", "Aggregate_Dimension": "", "Description": "", "Example_Policies": "" } ],
-  "gioia_data_structure": [ { "Concept_ID": "", "First_Order_Concept": "", "Theme_ID": "", "Second_Order_Theme": "", "Aggregate_ID": "", "Aggregate_Dimension": "" } ],
   "policy_summary": "",
   "refinement_summary": "",
   "research_question_memo": { "RQ_Focus": "", "Analytical_Memo": "" }
 }
-All values are strings (multi-value fields are semicolon-separated). Use "" only when something is genuinely undeterminable. Governance_Level must be exactly one of: ${GOVERNANCE_LEVELS.join(", ")}. In aggregate_dimensions, "Theme_IDs" holds the semicolon-separated second-order Theme_IDs.`;
+All values are strings (multi-value fields are semicolon-separated). Use "" only when something is genuinely undeterminable. Governance_Level must be exactly one of: ${GOVERNANCE_LEVELS.join(", ")}. A single document is coded only up to second-order themes — do not output aggregate dimensions or a Gioia data structure.`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STAGED PIPELINE PROMPTS (PIPELINE_MODE=staged)
@@ -390,7 +339,7 @@ METHODOLOGICAL RULES
 Preserve informant/policy language; employ gradual abstraction; keep transparent links between quotes and theory; keep first-order concepts close to the policy's own vocabulary; do not collapse meaningful variation across governance levels; do not force excerpts into pre-existing categories when conceptual novelty is present. Use the research questions to guide relevance and attention, but let codes, themes, and dimensions emerge inductively.
 
 LANGUAGE POLICY
-Detect the document's original language. Keep IN THE ORIGINAL LANGUAGE (do not translate): every verbatim excerpt (Excerpt_Text), every first-order concept label (First_Order_Concept) and its repetitions, and Example_Quote. Produce everything researcher-generated IN ENGLISH: metadata, all notes, second-order themes, aggregate dimensions, descriptions, summaries, and the memo. If the document is already in English, every field is in English.
+Detect the document's original language. Keep IN THE ORIGINAL LANGUAGE (do not translate): every verbatim excerpt (Excerpt_Text), every first-order concept label (First_Order_Concept) and its repetitions, and Example_Quote. Produce everything researcher-generated IN ENGLISH: metadata, all notes, second-order themes, summaries, and the memo. If the document is already in English, every field is in English.
 
 OUTPUT RULE
 Every populated field must contain substantive analytical content — never placeholder text ("TBD", "N/A", "Concepts", etc.). If something is genuinely undeterminable, use an empty string. Respond with a SINGLE JSON object and nothing else — no markdown, no code fences, no commentary.`;
@@ -451,26 +400,9 @@ const STAGE3_CONTRACT = `Return a JSON object with exactly this key:
 }
 Every provided Concept_ID must appear in exactly one theme's First_Order_Concept_IDs.`;
 
-const STAGE4_INSTRUCTIONS = `TASK — AGGREGATE DIMENSIONS (Gioia Step 5).
-
-You are given this document's second-order themes and the existing master codebook. Group semantically close second-order themes into aggregate (theoretical) dimensions relevant to the main research question. Expected ~4–8 dimensions (more or fewer allowed).
-- Aggregate_ID of the form AGG_1.
-- Theme_IDs: the grouped themes' Theme_IDs, semicolon-separated (use the provided IDs verbatim).
-- Second_Order_Themes: the grouped theme labels, semicolon-separated, IN ENGLISH.
-- Aggregate_Dimension: the dimension label IN ENGLISH.
-- Description: a short description IN ENGLISH.
-- Example_Policies: the Document_ID.
-- Each dimension should be supported by multiple related themes where possible. Keep aggregate dimensions relatively stable across the dataset; prefer reusing an existing Aggregate_ID, and create a new AGG_n only when existing dimensions cannot capture an emerging theoretical pattern.`;
-
-const STAGE4_CONTRACT = `Return a JSON object with exactly this key:
-{
-  "aggregate_dimensions": [ { "Aggregate_ID": "", "Theme_IDs": "", "Second_Order_Themes": "", "Aggregate_Dimension": "", "Description": "", "Example_Policies": "" } ]
-}
-Every provided Theme_ID must appear in exactly one dimension's Theme_IDs.`;
-
 const STAGE5_INSTRUCTIONS = `TASK — CROSS-DOCUMENT FLAGS, REFINEMENT SUMMARY, AND RESEARCH-QUESTION MEMO (Gioia Steps 7, 9, 10).
 
-You are given this document's full coding (metadata, excerpts, themes, dimensions) and the existing master codebook.
+You are given this document's coding (metadata, excerpts, second-order themes) and the existing codebook. A single document is coded only up to second-order themes; aggregate dimensions are produced later across the whole case study, so do not reference per-document aggregate dimensions here.
 
 ANALYTICAL FLAGS (Step 7). For each excerpt that warrants it, assign one or more flags (do not infer content not explicitly present in the policy):
 - [TENSION] — the document directly contradicts or diverges from an existing master-codebook entry.
@@ -480,7 +412,7 @@ ANALYTICAL FLAGS (Step 7). For each excerpt that warrants it, assign one or more
 - [TERRITORIAL LOGIC: LIMITED DIFFERENTIATION] — assumes uniform capacity or generic adaptation across territories.
 Return only excerpts that carry at least one flag, referencing them by Raw_ID.
 
-REFINEMENT SUMMARY (Step 9). 150–200 words IN ENGLISH explaining how and why first-order concepts, second-order themes, and aggregate dimensions were refined for consistency across policies. Explicitly justify any newly introduced codes, and note whether the document reinforced existing framings, introduced new labour-market or territorial concerns, clarified governance distribution, revealed tensions across governance levels, or sharpened coherent/place-sensitive/spatially-blind distinctions. Discuss the major flags here.
+REFINEMENT SUMMARY (Step 9). 150–200 words IN ENGLISH explaining how and why first-order concepts and second-order themes were refined for consistency across policies. Explicitly justify any newly introduced codes, and note whether the document reinforced existing framings, introduced new labour-market or territorial concerns, clarified governance distribution, revealed tensions across governance levels, or sharpened coherent/place-sensitive/spatially-blind distinctions. Discuss the major flags here.
 
 RESEARCH-QUESTION MEMO (Step 10). 150–250 words IN ENGLISH addressing the main and subsidiary research questions for this document: framing of labour-market challenges; translation of goals into implementation mechanisms; prioritised instruments; governance coordination across levels; acknowledgement of territorial unevenness and left-behind risks; place-sensitive vs spatially blind design; tensions/constraints/mismatches; and any flags raised. RQ_Focus is a one-line statement of the document's main analytical focus.`;
 
@@ -497,6 +429,78 @@ export const STAGE_SYSTEM = {
   metadata: `${CORE_FRAMING}\n\n${STAGE1_INSTRUCTIONS}\n\n${STAGE1_CONTRACT}`,
   concepts: `${CORE_FRAMING}\n\n${STAGE2_INSTRUCTIONS}\n\n${STAGE2_CONTRACT}`,
   themes: `${CORE_FRAMING}\n\n${STAGE3_INSTRUCTIONS}\n\n${STAGE3_CONTRACT}`,
-  dimensions: `${CORE_FRAMING}\n\n${STAGE4_INSTRUCTIONS}\n\n${STAGE4_CONTRACT}`,
   synthesis: `${CORE_FRAMING}\n\n${STAGE5_INSTRUCTIONS}\n\n${STAGE5_CONTRACT}`,
 } as const;
+
+/**
+ * A read-only, grouped view of the system prompts for the admin transparency
+ * page. Built from the same constants the pipeline actually uses, so it can
+ * never drift from what the model is really told.
+ */
+export function buildPromptView(activeMode: "staged" | "single"): PromptsDto {
+  return {
+    activeMode,
+    groups: [
+      {
+        title: "Per-document analysis — staged (default)",
+        description:
+          "Each uploaded document is analysed in four separate, individually-checked model calls. This is the default method.",
+        active: activeMode === "staged",
+        sections: [
+          {
+            id: "stage1",
+            title: "Step 1 — Metadata, key passages & summary",
+            description: "Reads the document, extracts its details and the most relevant excerpts, and writes a plain-language summary.",
+            content: STAGE_SYSTEM.metadata,
+          },
+          {
+            id: "stage2",
+            title: "Step 2 — First-order concepts",
+            description: "Labels each excerpt with short concepts kept close to the document's own wording.",
+            content: STAGE_SYSTEM.concepts,
+          },
+          {
+            id: "stage3",
+            title: "Step 3 — Second-order themes",
+            description: "Groups the concepts into broader researcher-defined themes — the final level for a single document.",
+            content: STAGE_SYSTEM.themes,
+          },
+          {
+            id: "stage4",
+            title: "Step 4 — Flags, refinement & research memo",
+            description: "Adds analytical flags (tensions, gaps…) and writes the refinement summary and research-question memo.",
+            content: STAGE_SYSTEM.synthesis,
+          },
+        ],
+      },
+      {
+        title: "Per-document analysis — single call",
+        description:
+          "An alternative method that does the whole per-document analysis in one model call. Used only when 'single' mode is selected in settings.",
+        active: activeMode === "single",
+        sections: [
+          {
+            id: "single",
+            title: "Full per-document analysis (one call)",
+            description: "Everything from metadata to second-order themes in a single prompt, with the required output format.",
+            content: `${GIOIA_SYSTEM_PROMPT}\n\n${GIOIA_OUTPUT_CONTRACT}`,
+          },
+        ],
+      },
+      {
+        title: "Case-study big-picture dimensions",
+        description:
+          "Run once per case study, across all its files, to group the themes into a handful of overarching dimensions.",
+        active: false,
+        sections: [
+          {
+            id: "aggregate",
+            title: "Aggregate-dimension synthesis",
+            description: "Groups the case study's distinct second-order themes into 4–8 big-picture dimensions.",
+            content: CROSS_DOC_AGGREGATE_SYSTEM,
+          },
+        ],
+      },
+    ],
+  };
+}

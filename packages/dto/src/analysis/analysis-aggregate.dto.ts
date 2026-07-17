@@ -36,6 +36,17 @@ export interface CrossDocumentGioiaStructureRowDto {
   aggregateDimension: string;
 }
 
+/**
+ * Freshness of a region-case-study's persisted aggregate vs its current files.
+ * `generatedAt` is null when it has never been extracted; `staleCount` is how
+ * many currently-selected files were not part of the last extraction.
+ */
+export interface CaseStudyAggregateStatusDto {
+  generatedAt: string | null;
+  documentCount: number;
+  staleCount: number;
+}
+
 /** Result of a cross-document aggregate-dimension extraction. */
 export interface CrossDocumentAggregateDto {
   documentIds: string[];

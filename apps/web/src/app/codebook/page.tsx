@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import type { CodebookDto, CodebookSheetDto } from "@gioia/dto";
-import { api, workbookDownloadUrl } from "@/lib/api";
+import { api, caseStudyWorkbookDownloadUrl } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 import { useRequireAuth } from "@/lib/use-require-auth";
 import { cn } from "@/lib/utils";
@@ -190,15 +190,23 @@ export default function CodebookPage() {
   const [data, setData] = useState<CodebookDto | null>(null);
   const [active, setActive] = useState(METADATA_SHEET);
   const [selectedDoc, setSelectedDoc] = useState<string | null>(null);
+  const [caseStudyId, setCaseStudyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const authed = useRequireAuth();
 
   useEffect(() => {
     if (!authed) return;
+    const cs = new URLSearchParams(window.location.search).get("cs");
+    setCaseStudyId(cs);
+    if (!cs) {
+      setError("Open a case study from the dashboard to view its codebook.");
+      setLoading(false);
+      return;
+    }
     void (async () => {
       try {
-        setData(await api.getCodebook());
+        setData(await api.getCaseStudyCodebook(cs));
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load codebook");
       } finally {
@@ -275,8 +283,9 @@ export default function CodebookPage() {
     return set;
   }, [fullMeta, multi, yearFrom, yearTo, search, anyFilter]);
 
-  // Excel download honours the active filters by passing the matching docs.
-  const downloadHref = matchingDocs ? workbookDownloadUrl([...matchingDocs]) : workbookDownloadUrl();
+  // Download the whole case-study codebook Excel (per-document filtering is a
+  // view-only convenience here; the file is the full case-study codebook).
+  const downloadHref = caseStudyId ? caseStudyWorkbookDownloadUrl(caseStudyId) : "#";
 
   // Every sheet, filtered to the matching documents.
   const displaySheets = useMemo(
@@ -348,14 +357,11 @@ export default function CodebookPage() {
           <Button asChild variant="outline">
             <a href="/dashboard">← Dashboard</a>
           </Button>
-          {anyFilter && (
-            <Button asChild>
-              <a href={downloadHref}>Download filtered .xlsx</a>
+          {caseStudyId && (
+            <Button asChild variant="outline">
+              <a href={downloadHref}>Download .xlsx</a>
             </Button>
           )}
-          <Button asChild variant="outline">
-            <a href={workbookDownloadUrl()}>Download .xlsx</a>
-          </Button>
           <Button variant="ghost" onClick={() => void authClient.signOut()}>
             Log out
           </Button>

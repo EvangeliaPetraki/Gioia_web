@@ -75,14 +75,19 @@ export interface ResearchQuestionMemo {
   Analytical_Memo: string;
 }
 
-/** The full structured analysis returned by the model for one policy document. */
+/**
+ * The structured analysis returned by the model for one policy document.
+ *
+ * Per-document analysis stops at second-order themes: aggregate dimensions are
+ * NOT produced per document — they are synthesised once per region-case-study
+ * across its selected files (see CrossDocumentAggregateDto). The `AggregateDimension`
+ * / `GioiaStructureRow` types above are retained for that case-study-level output.
+ */
 export interface GioiaAnalysis {
   policy_metadata: PolicyMetadata;
   raw_data_extraction: RawExcerpt[];
   first_order_concepts: FirstOrderConcept[];
   second_order_themes: SecondOrderTheme[];
-  aggregate_dimensions: AggregateDimension[];
-  gioia_data_structure: GioiaStructureRow[];
   policy_summary: string;
   refinement_summary: string;
   research_question_memo: ResearchQuestionMemo;

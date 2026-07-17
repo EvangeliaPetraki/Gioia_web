@@ -18,14 +18,20 @@ model User {
   emailVerified Boolean   @default(false)
   image         String?
   role          String?   @default("user")
+  // Better Auth username plugin: login by username. `username` is stored
+  // normalized (lowercased) and is unique; `displayUsername` keeps the original
+  // casing. Nullable so pre-existing (email-only) users keep working.
+  username        String? @unique
+  displayUsername String?
   banned        Boolean?  @default(false)
   banReason     String?
   banExpires    DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  sessions Session[]
-  accounts Account[]
+  sessions     Session[]
+  accounts     Account[]
+  ownedRegions RegionOwner[]
 
   @@map("user")
 }
@@ -101,12 +107,22 @@ model AnalyzedDocument {
   analyticalMemo    String   @db.Text
   createdAt         DateTime @default(now())
 
-  rawExcerpts         RawExcerpt[]
-  firstOrderConcepts  FirstOrderConcept[]
-  secondOrderThemes   SecondOrderTheme[]
-  aggregateDimensions AggregateDimension[]
-  gioiaStructureRows  GioiaStructureRow[]
+  // Case-study scoping. `fileHash` is the sha256 of the uploaded PDF bytes; the
+  // analysis of a given file is reused across regions that share the same
+  // case-study type, so the natural reuse key is (fileHash, caseStudyTypeId).
+  // Both are nullable/defaulted so legacy rows survive migration; they are
+  // backfilled onto a "legacy" case-study type on boot.
+  fileHash        String         @default("")
+  caseStudyTypeId String?
+  caseStudyType   CaseStudyType? @relation(fields: [caseStudyTypeId], references: [id])
 
+  rawExcerpts        RawExcerpt[]
+  firstOrderConcepts FirstOrderConcept[]
+  secondOrderThemes  SecondOrderTheme[]
+  fileSelections     FileSelection[]
+
+  @@unique([fileHash, caseStudyTypeId])
+  @@index([caseStudyTypeId])
   @@map("analyzed_documents")
 }
 
@@ -161,23 +177,6 @@ model SecondOrderTheme {
   @@map("second_order_themes")
 }
 
-model AggregateDimension {
-  id                Int    @id @default(autoincrement())
-  documentId        String
-  orderIndex        Int
-  aggregateId       String
-  themeIds          String @db.Text
-  secondOrderThemes String @db.Text
-  aggregateDimension String @db.Text
-  description       String @db.Text
-  examplePolicies   String @db.Text
-
-  document AnalyzedDocument @relation(fields: [documentId], references: [documentId], onDelete: Cascade)
-
-  @@index([documentId])
-  @@map("aggregate_dimensions")
-}
-
 // Singleton row holding the admin-selected model configuration for the pipeline
 // (replaces the env-driven MODEL_PROFILE / PIPELINE_MODE / MODEL_EFFORT).
 model AnalysisSetting {
@@ -191,19 +190,100 @@ model AnalysisSetting {
   @@map("analysis_settings")
 }
 
-model GioiaStructureRow {
-  id                Int    @id @default(autoincrement())
+// ── Case-study organisation ─────────────────────────────────────────────────
+// A region (belonging to a country) runs one or more case studies. Case-study
+// *types* (tourism, transportation, …) are a shared taxonomy: a file analysed
+// under a given type is reused across every region that also runs that type.
+// The per-region selection of files lives in FileSelection.
+
+model Region {
+  id        String   @id @default(cuid())
+  country   String
+  name      String
+  createdAt DateTime @default(now())
+
+  // Access control: the users who may see/use this region's case studies
+  // (many-to-many). A region with no owners is admin-only.
+  owners      RegionOwner[]
+  caseStudies RegionCaseStudy[]
+
+  @@unique([country, name])
+  @@map("regions")
+}
+
+// Join row: one user allowed to see/use one region. Editable after creation.
+model RegionOwner {
+  regionId String
+  userId   String
+
+  region Region @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([regionId, userId])
+  @@index([userId])
+  @@map("region_owners")
+}
+
+model CaseStudyType {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+
+  regionCaseStudies RegionCaseStudy[]
+  documents         AnalyzedDocument[]
+
+  @@map("case_study_types")
+}
+
+// One region running one case-study type ("Crete's transportation"). This is
+// the unit the admin creates and uploads files into.
+model RegionCaseStudy {
+  id              String   @id @default(cuid())
+  regionId        String
+  caseStudyTypeId String
+  createdAt       DateTime @default(now())
+
+  region        Region              @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  caseStudyType CaseStudyType       @relation(fields: [caseStudyTypeId], references: [id], onDelete: Cascade)
+  selections    FileSelection[]
+  aggregate     CaseStudyAggregate?
+
+  @@unique([regionId, caseStudyTypeId])
+  @@index([caseStudyTypeId])
+  @@map("region_case_studies")
+}
+
+// The aggregate-dimension synthesis for one region-case-study, computed across
+// its selected files (Gioia Step 5 at the case-study level). Persisted so the
+// case study's codebook is stable; `documentIds` snapshots which files it was
+// built from, to detect staleness after new uploads. `dimensions` and
+// `structureRows` hold the CrossDocumentAggregateDto payload as JSON.
+model CaseStudyAggregate {
+  regionCaseStudyId String   @id
+  documentIds       String   @db.Text
+  themeCount        Int
+  dimensions        String   @db.Text
+  structureRows     String   @db.Text
+  generatedAt       DateTime @default(now())
+
+  regionCaseStudy RegionCaseStudy @relation(fields: [regionCaseStudyId], references: [id], onDelete: Cascade)
+
+  @@map("case_study_aggregates")
+}
+
+// Links a shared analysis into one region's case study. Reports/aggregates for
+// a region use only the analyses it selected here.
+model FileSelection {
+  id                String   @id @default(cuid())
+  regionCaseStudyId String
   documentId        String
-  orderIndex        Int
-  conceptId         String
-  firstOrderConcept String @db.Text
-  themeId           String
-  secondOrderTheme  String @db.Text
-  aggregateId       String
-  aggregateDimension String @db.Text
+  originalFilename  String
+  createdAt         DateTime @default(now())
 
-  document AnalyzedDocument @relation(fields: [documentId], references: [documentId], onDelete: Cascade)
+  regionCaseStudy RegionCaseStudy  @relation(fields: [regionCaseStudyId], references: [id], onDelete: Cascade)
+  document        AnalyzedDocument @relation(fields: [documentId], references: [documentId], onDelete: Cascade)
 
+  @@unique([regionCaseStudyId, documentId])
   @@index([documentId])
-  @@map("gioia_structure_rows")
+  @@map("file_selections")
 }

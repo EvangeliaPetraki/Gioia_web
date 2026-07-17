@@ -1,15 +1,17 @@
 import { betterAuth, type Auth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
-import { admin } from "better-auth/plugins";
+import { admin, username } from "better-auth/plugins";
 import { PrismaClient } from "@prisma/client";
 
 // Better Auth needs a Prisma client at module scope (before Nest DI is ready).
 const prisma = new PrismaClient();
 
 /**
- * Email/password auth with the admin plugin. Sign-up is disabled — users are
- * created only by an admin (the admin plugin's create-user endpoint). The first
- * admin is seeded from ADMIN_EMAIL/ADMIN_PASSWORD (see AdminBootstrapService).
+ * Email/password auth with the admin + username plugins. Users can sign in with
+ * either their email or their username (`authClient.signIn.username`). Sign-up is
+ * disabled — users are created only by an admin (the admin plugin's create-user
+ * endpoint, which also sets the username). The first admin is seeded from
+ * ADMIN_EMAIL/ADMIN_PASSWORD (see AdminBootstrapService).
  */
 export const auth: Auth = betterAuth({
   database: prismaAdapter(prisma, { provider: "postgresql" }),
@@ -29,5 +31,5 @@ export const auth: Auth = betterAuth({
     enabled: true,
     disableSignUp: true, // no public registration; admins create users
   },
-  plugins: [admin()],
+  plugins: [admin(), username()],
 }) as unknown as Auth;

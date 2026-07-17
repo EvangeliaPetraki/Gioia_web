@@ -2,10 +2,16 @@ import type {
   AnalysisSettingsDto,
   AnalysisSettingsResponseDto,
   AnalysisSummaryDto,
+  CaseStudyAggregateStatusDto,
+  CaseStudyCatalogDto,
+  CaseStudyTypeDto,
   CodebookDto,
   CrossDocumentAggregateDto,
   PolicyDetailDto,
   PolicyListItemDto,
+  PromptsDto,
+  RegionCaseStudyDto,
+  RegionDto,
   UpdateAnalysisSettingsDto,
 } from "@gioia/dto";
 import { API_URL } from "./api-url";
@@ -36,19 +42,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/** Download URL for the master codebook; navigation includes the session cookie. */
-export function workbookDownloadUrl(docs?: string[]): string {
-  const params = new URLSearchParams();
-  if (docs && docs.length > 0) params.set("docs", docs.join(","));
-  const qs = params.toString();
-  return `${API_URL}/analysis/workbook${qs ? `?${qs}` : ""}`;
+/** Download URL for one region-case-study's codebook; navigation sends the cookie. */
+export function caseStudyWorkbookDownloadUrl(regionCaseStudyId: string): string {
+  return `${API_URL}/analysis/region-case-studies/${encodeURIComponent(regionCaseStudyId)}/workbook`;
 }
 
 export const api = {
-  /** Upload one PDF policy document and run the Gioia analysis. */
-  async analysePdf(file: File): Promise<AnalysisSummaryDto> {
+  /** Upload one PDF into a region's case study and run (or reuse) the analysis. */
+  async analysePdf(file: File, regionCaseStudyId: string): Promise<AnalysisSummaryDto> {
     const form = new FormData();
     form.append("file", file);
+    form.append("regionCaseStudyId", regionCaseStudyId);
     const res = await fetch(`${API_URL}/analysis/upload`, {
       method: "POST",
       credentials: "include",
@@ -75,10 +79,83 @@ export const api = {
 
   listPolicies: () => request<PolicyListItemDto[]>("/analysis/policies"),
 
+  // ── Case-study organisation ────────────────────────────────────────────────
+
+  /** The country→region→case-study tree + case-study-type taxonomy. */
+  getCatalog: () => request<CaseStudyCatalogDto>("/analysis/catalog"),
+
+  createRegion: (country: string, name: string, userIds: string[]) =>
+    request<RegionDto>("/analysis/regions", {
+      method: "POST",
+      body: JSON.stringify({ country, name, userIds }),
+    }),
+
+  deleteRegion: (id: string) =>
+    request<void>(`/analysis/regions/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  /** Rename a region / change its country (admin). */
+  updateRegion: (id: string, country: string, name: string) =>
+    request<RegionDto>(`/analysis/regions/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ country, name }),
+    }),
+
+  /** Replace a region's owner set (admin). */
+  setRegionOwners: (id: string, userIds: string[]) =>
+    request<RegionDto>(`/analysis/regions/${encodeURIComponent(id)}/owners`, {
+      method: "PUT",
+      body: JSON.stringify({ userIds }),
+    }),
+
+  createCaseStudyType: (name: string) =>
+    request<CaseStudyTypeDto>("/analysis/case-study-types", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+
+  createRegionCaseStudy: (regionId: string, caseStudyTypeId: string) =>
+    request<RegionCaseStudyDto>("/analysis/region-case-studies", {
+      method: "POST",
+      body: JSON.stringify({ regionId, caseStudyTypeId }),
+    }),
+
+  deleteRegionCaseStudy: (id: string) =>
+    request<void>(`/analysis/region-case-studies/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  /** Files one region-case-study has selected. */
+  listCaseStudyPolicies: (regionCaseStudyId: string) =>
+    request<PolicyListItemDto[]>(
+      `/analysis/region-case-studies/${encodeURIComponent(regionCaseStudyId)}/policies`,
+    ),
+
+  /** Exclude a file from a case study (unlinks only; the analysis is kept). */
+  excludeFile: (regionCaseStudyId: string, documentId: string) =>
+    request<void>(
+      `/analysis/region-case-studies/${encodeURIComponent(regionCaseStudyId)}/files/${encodeURIComponent(documentId)}`,
+      { method: "DELETE" },
+    ),
+
+  /** Aggregate dimensions over one region-case-study's selected files (admin). */
+  aggregateForCaseStudy: (regionCaseStudyId: string) =>
+    request<CrossDocumentAggregateDto>(
+      `/analysis/region-case-studies/${encodeURIComponent(regionCaseStudyId)}/aggregate`,
+      { method: "POST" },
+    ),
+
   getPolicyDetail: (documentId: string) =>
     request<PolicyDetailDto>(`/analysis/policies/${encodeURIComponent(documentId)}`),
 
-  getCodebook: () => request<CodebookDto>("/analysis/codebook"),
+  /** One region-case-study's codebook (structured, 9 sheets). */
+  getCaseStudyCodebook: (regionCaseStudyId: string) =>
+    request<CodebookDto>(
+      `/analysis/region-case-studies/${encodeURIComponent(regionCaseStudyId)}/codebook`,
+    ),
+
+  /** Freshness of a case study's aggregate vs its current files. */
+  getAggregateStatus: (regionCaseStudyId: string) =>
+    request<CaseStudyAggregateStatusDto>(
+      `/analysis/region-case-studies/${encodeURIComponent(regionCaseStudyId)}/aggregate-status`,
+    ),
 
   updateDocumentNote: (documentId: string, note: string) =>
     request<{ documentId: string; note: string }>(
@@ -88,6 +165,9 @@ export const api = {
 
   /** Current model selection + the options the admin UI renders. */
   getSettings: () => request<AnalysisSettingsResponseDto>("/analysis/settings"),
+
+  /** Read-only view of the system prompts used in the LLM calls (admin). */
+  getPrompts: () => request<PromptsDto>("/analysis/prompts"),
 
   /** Update the model selection (admin only). */
   updateSettings: (patch: UpdateAnalysisSettingsDto) =>

@@ -7,7 +7,6 @@ import type {
   AnalysisSettingsDto,
   FirstOrderConcept,
   GioiaAnalysis,
-  GioiaStructureRow,
   PolicyMetadata,
   RawExcerpt,
   ResearchQuestionMemo,
@@ -175,8 +174,7 @@ export class GioiaService {
     // Each stage gets only the codebook level it reuses.
     const conceptCtx = this.contextSection(existing, { concepts: true });
     const themeCtx = this.contextSection(existing, { themes: true });
-    const dimensionCtx = this.contextSection(existing, { dimensions: true });
-    const synthesisCtx = this.contextSection(existing, { themes: true, dimensions: true });
+    const synthesisCtx = this.contextSection(existing, { themes: true });
 
     // Resolve the model for each tier once, from the selected profile.
     const effort = settings.effort;
@@ -241,30 +239,14 @@ export class GioiaService {
       Example_Quote: str(t.Example_Quote),
     }));
 
-    // Stage 4 — aggregate dimensions
-    const s4 = await this.runStage(
-      reasonRef,
-      think,
-      STAGE_SYSTEM.dimensions,
-      () => this.stage4User(documentId, themes, dimensionCtx),
-      (j) => this.validateStage4(j, themes),
-      "stage4-dimensions",
-    );
-    const dimensions: AggregateDimension[] = asArray(s4.aggregate_dimensions).map((a) => ({
-      Aggregate_ID: str(a.Aggregate_ID),
-      Theme_IDs: str(a.Theme_IDs),
-      Second_Order_Themes: str(a.Second_Order_Themes),
-      Aggregate_Dimension: str(a.Aggregate_Dimension),
-      Description: str(a.Description),
-      Example_Policies: str(a.Example_Policies) || documentId,
-    }));
-
-    // Stage 5 — cross-document flags + refinement summary + RQ memo
+    // Stage 5 — cross-document flags + refinement summary + RQ memo.
+    // A single document is coded only up to second-order themes; aggregate
+    // dimensions are synthesised later across the whole case study.
     const s5 = await this.runStage(
       reasonRef,
       think,
       STAGE_SYSTEM.synthesis,
-      () => this.stage5User(documentId, meta, rawExcerpts, themes, dimensions, synthesisCtx),
+      () => this.stage5User(documentId, meta, rawExcerpts, themes, synthesisCtx),
       (j) => this.validateStage5(j, rawExcerpts),
       "stage5-synthesis",
     );
@@ -281,12 +263,9 @@ export class GioiaService {
       Analytical_Memo: str(memoRaw.Analytical_Memo),
     };
 
-    // Step 6 — assemble the Gioia data structure deterministically in code.
-    const gioiaStructure = this.buildDataStructure(concepts, themes, dimensions);
-
     this.logger.log(
       `Staged analysis complete for ${documentId}: ${rawExcerpts.length} excerpts, ` +
-        `${concepts.length} concepts, ${themes.length} themes, ${dimensions.length} dimensions.`,
+        `${concepts.length} concepts, ${themes.length} themes (stops at themes).`,
     );
 
     return {
@@ -294,8 +273,6 @@ export class GioiaService {
       raw_data_extraction: rawExcerpts,
       first_order_concepts: concepts,
       second_order_themes: themes,
-      aggregate_dimensions: dimensions,
-      gioia_data_structure: gioiaStructure,
       policy_summary: policySummary,
       refinement_summary: str(s5.refinement_summary),
       research_question_memo: researchQuestionMemo,
@@ -371,31 +348,18 @@ export class GioiaService {
     ].join("\n");
   }
 
-  private stage4User(documentId: string, themes: SecondOrderTheme[], existingContext: string): string {
-    return [
-      `DOCUMENT_ID: ${documentId}`,
-      "",
-      "EXISTING MASTER CODEBOOK (keep dimensions stable; reuse an Aggregate_ID where possible):",
-      existingContext,
-      "",
-      "SECOND-ORDER THEMES TO GROUP INTO AGGREGATE DIMENSIONS (use these Theme_IDs verbatim):",
-      JSON.stringify(themes.map((t) => ({ Theme_ID: t.Theme_ID, Second_Order_Theme: t.Second_Order_Theme }))),
-    ].join("\n");
-  }
-
   private stage5User(
     documentId: string,
     meta: PolicyMetadata,
     excerpts: RawExcerpt[],
     themes: SecondOrderTheme[],
-    dimensions: AggregateDimension[],
     existingContext: string,
   ): string {
     return [
       `DOCUMENT_ID: ${documentId}`,
       `POLICY: ${str(meta.Policy_Name)} (${str(meta.Country_or_Region)}, ${String(meta.Governance_Level)})`,
       "",
-      "EXISTING MASTER CODEBOOK (for judging what is reused vs newly introduced, and TENSION/ABSENCE):",
+      "EXISTING CODEBOOK (for judging what is reused vs newly introduced, and TENSION/ABSENCE):",
       existingContext,
       "",
       "THIS DOCUMENT'S CODING:",
@@ -405,10 +369,6 @@ export class GioiaService {
       ),
       "Second-order themes:",
       JSON.stringify(themes.map((t) => ({ Theme_ID: t.Theme_ID, Second_Order_Theme: t.Second_Order_Theme }))),
-      "Aggregate dimensions:",
-      JSON.stringify(
-        dimensions.map((d) => ({ Aggregate_ID: d.Aggregate_ID, Aggregate_Dimension: d.Aggregate_Dimension })),
-      ),
     ].join("\n");
   }
 
@@ -491,30 +451,6 @@ export class GioiaService {
     return errs;
   }
 
-  private validateStage4(j: Json, themes: SecondOrderTheme[]): string[] {
-    const errs: string[] = [];
-    const themeIds = new Set(themes.map((t) => t.Theme_ID));
-    const dims = asArray(j.aggregate_dimensions);
-    if (dims.length === 0) errs.push("aggregate_dimensions is empty.");
-    const aggIds = new Set<string>();
-    const grouped = new Set<string>();
-    for (const d of dims) {
-      const aid = str(d.Aggregate_ID);
-      if (!/^AGG_\d+/.test(aid)) errs.push(`Aggregate_ID "${aid}" is malformed (expected AGG_1).`);
-      if (aggIds.has(aid)) errs.push(`Duplicate Aggregate_ID "${aid}".`);
-      aggIds.add(aid);
-      if (!str(d.Aggregate_Dimension)) errs.push(`Aggregate_Dimension is empty for ${aid}.`);
-      for (const tid of splitIds(d.Theme_IDs)) {
-        if (!themeIds.has(tid)) errs.push(`Dimension ${aid} references unknown Theme_ID "${tid}".`);
-        else grouped.add(tid);
-      }
-    }
-    for (const tid of themeIds) {
-      if (!grouped.has(tid)) errs.push(`Theme ${tid} is not grouped into any aggregate dimension.`);
-    }
-    return errs;
-  }
-
   private validateStage5(j: Json, excerpts: RawExcerpt[]): string[] {
     const errs: string[] = [];
     const rawIds = new Set(excerpts.map((r) => r.Raw_ID));
@@ -532,44 +468,6 @@ export class GioiaService {
       errs.push("research_question_memo.RQ_Focus / Analytical_Memo is incomplete.");
     }
     return errs;
-  }
-
-  // ── Step 6: deterministic Gioia data structure (concept → theme → dimension) ─
-
-  private buildDataStructure(
-    concepts: FirstOrderConcept[],
-    themes: SecondOrderTheme[],
-    dimensions: AggregateDimension[],
-  ): GioiaStructureRow[] {
-    const themeByConcept = new Map<string, SecondOrderTheme>();
-    for (const t of themes) {
-      for (const cid of splitIds(t.First_Order_Concept_IDs)) {
-        if (!themeByConcept.has(cid)) themeByConcept.set(cid, t);
-      }
-    }
-    const dimByTheme = new Map<string, AggregateDimension>();
-    for (const d of dimensions) {
-      for (const tid of splitIds(d.Theme_IDs)) {
-        if (!dimByTheme.has(tid)) dimByTheme.set(tid, d);
-      }
-    }
-    const seen = new Set<string>();
-    const rows: GioiaStructureRow[] = [];
-    for (const c of concepts) {
-      if (seen.has(c.Concept_ID)) continue; // one row per first-order concept (type)
-      seen.add(c.Concept_ID);
-      const t = themeByConcept.get(c.Concept_ID);
-      const d = t ? dimByTheme.get(t.Theme_ID) : undefined;
-      rows.push({
-        Concept_ID: c.Concept_ID,
-        First_Order_Concept: c.First_Order_Concept,
-        Theme_ID: t?.Theme_ID ?? "",
-        Second_Order_Theme: t?.Second_Order_Theme ?? "",
-        Aggregate_ID: d?.Aggregate_ID ?? "",
-        Aggregate_Dimension: d?.Aggregate_Dimension ?? "",
-      });
-    }
-    return rows;
   }
 
   // ── Cross-document aggregate-dimension synthesis ────────────────────────────
@@ -650,11 +548,11 @@ export class GioiaService {
     existing: ExistingContext,
     settings: AnalysisSettingsDto,
   ): Promise<GioiaAnalysis> {
-    // Single-call mode does every step at once, so it gets all levels.
+    // Single-call mode codes one document up to second-order themes, so it
+    // reuses the concept and theme vocabulary (not aggregate dimensions).
     const fullContext = this.contextSection(existing, {
       concepts: true,
       themes: true,
-      dimensions: true,
     });
     const systemPrompt = `${GIOIA_SYSTEM_PROMPT}\n\n${GIOIA_OUTPUT_CONTRACT}`;
     const userMessage = [
@@ -705,9 +603,15 @@ export class GioiaService {
     label: string,
   ): Promise<string> {
     const client = this.getAnthropic();
+    // Output-token ceiling. Every call streams (below), so large values are safe
+    // from HTTP timeouts — the only limit is each model's hard output cap
+    // (Haiku 4.5 = 64K; Sonnet 4.6 / Opus = 128K). The concepts stage copies
+    // every excerpt verbatim and can be large, especially for non-English
+    // documents (Greek, etc.) that tokenise ~2–3× heavier; 12K truncated them.
+    const maxOut = /haiku/i.test(model) ? 60000 : 64000;
     const params: Record<string, unknown> = {
       model,
-      max_tokens: opts.think ? 24000 : 12000,
+      max_tokens: maxOut,
       system,
       messages: [{ role: "user", content: user }],
     };
@@ -726,6 +630,13 @@ export class GioiaService {
       if (message.stop_reason === "refusal") {
         throw new ServiceUnavailableException(`The analysis model declined the request (${label}).`);
       }
+      if (message.stop_reason === "max_tokens") {
+        throw new ServiceUnavailableException(
+          `The analysis output for ${label} hit the model's output limit and was cut off ` +
+            `(the document is likely very long, or non-English text expanded the output). ` +
+            `Try a shorter document or a model with a larger output budget.`,
+        );
+      }
       let out = "";
       for (const block of message.content) if (block.type === "text") out += block.text;
       return out;
@@ -733,7 +644,9 @@ export class GioiaService {
       if (err instanceof ServiceUnavailableException) throw err;
       const detail = err instanceof Error ? err.message : "unknown error";
       this.logger.error(`${label} (Claude ${model}) request failed: ${detail}`);
-      throw new ServiceUnavailableException(`Analysis model request failed: ${detail}`);
+      throw new ServiceUnavailableException(
+        `Analysis step "${label}" failed on Claude model ${model}: ${detail}`,
+      );
     }
   }
 
@@ -751,15 +664,22 @@ export class GioiaService {
       stream: true as const,
     };
     try {
-      return await this.stream(client, { ...base, response_format: { type: "json_object" } });
-    } catch (err) {
-      if (this.isBadRequest(err)) {
+      try {
+        return await this.stream(client, { ...base, response_format: { type: "json_object" } });
+      } catch (err) {
+        // Some open providers reject response_format; retry once without JSON
+        // mode. This retry is inside the outer try so its own failures are
+        // wrapped too (previously they escaped as an unhandled 500).
+        if (!this.isBadRequest(err)) throw err;
         this.logger.warn(`${label}: provider rejected response_format; retrying without JSON mode.`);
         return await this.stream(client, base);
       }
+    } catch (err) {
       const detail = err instanceof Error ? err.message : "unknown error";
       this.logger.error(`${label} (Chutes ${model}) request failed: ${detail}`);
-      throw new ServiceUnavailableException(`Analysis model request failed: ${detail}`);
+      throw new ServiceUnavailableException(
+        `Analysis step "${label}" failed on Chutes model ${model}: ${detail}`,
+      );
     }
   }
 
