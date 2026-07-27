@@ -20,6 +20,7 @@ import {
   STAGE_SYSTEM,
   type ExistingContext,
 } from "./gioia.constants";
+import type { StageUsage } from "./pricing";
 import { SettingsService } from "./settings.service";
 
 /** Whether a model call should use adaptive thinking, and at what effort. */
@@ -58,6 +59,12 @@ type Tier = "extract" | "concepts" | "reason";
 interface ModelRef {
   provider: "anthropic" | "chutes";
   model: string;
+}
+
+/** Token usage returned by a single model call. */
+interface CallUsage {
+  inputTokens: number;
+  outputTokens: number;
 }
 
 const PROFILES: Record<string, Record<Tier, ModelRef>> = {
@@ -137,11 +144,38 @@ export class GioiaService {
    * selection comes from the admin-managed settings (DB): "staged" (multi-call
    * pipeline with per-stage validation) or "single" (one call, one model).
    */
-  async analyse(policyText: string, fileName: string, existing: ExistingContext): Promise<GioiaAnalysis> {
+  async analyse(
+    policyText: string,
+    fileName: string,
+    existing: ExistingContext,
+    caseStudyName?: string,
+  ): Promise<{ analysis: GioiaAnalysis; usage: StageUsage[] }> {
     const settings = await this.settings.getSettings();
-    return settings.mode === "single"
-      ? this.analyseSingle(policyText, fileName, existing, settings)
-      : this.analyseStaged(policyText, fileName, existing, settings);
+    const usage: StageUsage[] = [];
+    const analysis =
+      settings.mode === "single"
+        ? await this.analyseSingle(policyText, fileName, existing, settings, caseStudyName, usage)
+        : await this.analyseStaged(policyText, fileName, existing, settings, caseStudyName, usage);
+    return { analysis, usage };
+  }
+
+  /**
+   * A light sensitizing frame naming the case study (Energy / Tourism / …), so
+   * the model reads the document *for* that sector — guiding which passages are
+   * relevant and the second-order interpretation, WITHOUT forcing the sector
+   * onto first-order concepts. Empty when no case study is given (e.g. legacy).
+   */
+  private caseStudyContext(name?: string): string {
+    const cs = name?.trim();
+    if (!cs) return "";
+    return (
+      `CASE STUDY CONTEXT\n` +
+      `This document is being analysed as part of the "${cs}" case study. Read it for how it bears on ` +
+      `${cs}-sector labour-market resilience in the twin transition: prioritise the most relevant passages ` +
+      `and let this lens inform the researcher-centric (second-order) interpretation. Do NOT impose the ${cs} ` +
+      `sector where the text does not support it, and keep first-order concepts grounded in the document's own ` +
+      `wording.\n\n`
+    );
   }
 
   /**
@@ -170,11 +204,16 @@ export class GioiaService {
     fileName: string,
     existing: ExistingContext,
     settings: AnalysisSettingsDto,
+    caseStudyName: string | undefined,
+    usage: StageUsage[],
   ): Promise<GioiaAnalysis> {
     // Each stage gets only the codebook level it reuses.
     const conceptCtx = this.contextSection(existing, { concepts: true });
     const themeCtx = this.contextSection(existing, { themes: true });
     const synthesisCtx = this.contextSection(existing, { themes: true });
+    // Sensitizing frame for relevance (stage 1) + interpretation (stages 3/5);
+    // deliberately NOT added to stage 2 so first-order concepts stay data-driven.
+    const csNote = this.caseStudyContext(caseStudyName);
 
     // Resolve the model for each tier once, from the selected profile.
     const effort = settings.effort;
@@ -189,9 +228,10 @@ export class GioiaService {
       extractRef,
       noThink,
       STAGE_SYSTEM.metadata,
-      () => this.stage1User(fileName, policyText),
+      () => csNote + this.stage1User(fileName, policyText),
       (j) => this.validateStage1(j),
       "stage1-metadata",
+      usage,
     );
     const meta = s1.policy_metadata as PolicyMetadata;
     const documentId = String(meta.Document_ID ?? "").trim() || "DOC_01";
@@ -212,6 +252,7 @@ export class GioiaService {
       () => this.stage2User(documentId, rawExcerpts, conceptCtx),
       (j) => this.validateStage2(j, rawExcerpts),
       "stage2-concepts",
+      usage,
     );
     const concepts: FirstOrderConcept[] = asArray(s2.first_order_concepts).map((c) => ({
       Concept_Instance_ID: str(c.Concept_Instance_ID),
@@ -227,9 +268,10 @@ export class GioiaService {
       reasonRef,
       think,
       STAGE_SYSTEM.themes,
-      () => this.stage3User(documentId, concepts, themeCtx),
+      () => csNote + this.stage3User(documentId, concepts, themeCtx),
       (j) => this.validateStage3(j, concepts),
       "stage3-themes",
+      usage,
     );
     const themes: SecondOrderTheme[] = asArray(s3.second_order_themes).map((t) => ({
       Theme_ID: str(t.Theme_ID),
@@ -246,9 +288,10 @@ export class GioiaService {
       reasonRef,
       think,
       STAGE_SYSTEM.synthesis,
-      () => this.stage5User(documentId, meta, rawExcerpts, themes, synthesisCtx),
+      () => csNote + this.stage5User(documentId, meta, rawExcerpts, themes, synthesisCtx),
       (j) => this.validateStage5(j, rawExcerpts),
       "stage5-synthesis",
+      usage,
     );
     const flagsByRaw = new Map<string, string>();
     for (const f of asArray(s5.analytical_flags)) {
@@ -279,7 +322,8 @@ export class GioiaService {
     };
   }
 
-  /** Run one stage, validate, repair once on failure, then fail loudly. */
+  /** Run one stage, validate, repair once on failure, then fail loudly. Every
+   * model call (including the repair) is appended to `usage` for cost tracking. */
   private async runStage(
     ref: ModelRef,
     opts: CallOpts,
@@ -287,19 +331,22 @@ export class GioiaService {
     buildUser: () => string,
     validate: (j: Json) => string[],
     label: string,
+    usage: StageUsage[],
   ): Promise<Json> {
     const user = buildUser();
-    let parsed = await this.callModel(system, user, label, ref, opts);
-    let errs = validate(parsed);
-    if (errs.length === 0) return parsed;
+    let call = await this.callModel(system, user, label, ref, opts);
+    usage.push({ provider: ref.provider, model: ref.model, stage: label, ...call.usage });
+    let errs = validate(call.parsed);
+    if (errs.length === 0) return call.parsed;
 
     this.logger.warn(`${label}: ${errs.length} validation issue(s); repairing. First: ${errs[0]}`);
     const repairUser = `${user}\n\nA PREVIOUS ATTEMPT FAILED THESE VALIDATION CHECKS:\n- ${errs.join(
       "\n- ",
     )}\n\nReturn a corrected JSON object that fixes every issue. Output JSON only.`;
-    parsed = await this.callModel(system, repairUser, `${label}-repair`, ref, opts);
-    errs = validate(parsed);
-    if (errs.length === 0) return parsed;
+    call = await this.callModel(system, repairUser, `${label}-repair`, ref, opts);
+    usage.push({ provider: ref.provider, model: ref.model, stage: `${label}-repair`, ...call.usage });
+    errs = validate(call.parsed);
+    if (errs.length === 0) return call.parsed;
 
     throw new ServiceUnavailableException(
       `${label} failed validation after repair: ${errs.slice(0, 6).join("; ")}`,
@@ -476,13 +523,14 @@ export class GioiaService {
   async aggregateAcrossDocuments(
     documentIds: string[],
     themes: { themeId: string; label: string; documents: string[] }[],
-  ): Promise<AggregateDimension[]> {
+  ): Promise<{ dimensions: AggregateDimension[]; usage: StageUsage[] }> {
     const settings = await this.settings.getSettings();
     const ref =
       settings.mode === "single"
         ? parseModelRef(settings.singleModel)
         : this.resolveModel("reason", settings.profile);
     const opts: CallOpts = { think: ref.provider === "anthropic", effort: settings.effort };
+    const usage: StageUsage[] = [];
 
     const j = await this.runStage(
       ref,
@@ -504,9 +552,10 @@ export class GioiaService {
         ].join("\n"),
       (res) => this.validateCrossDocAggregate(res, themes),
       "cross-doc-aggregate",
+      usage,
     );
 
-    return asArray(j.aggregate_dimensions).map((a) => ({
+    const dimensions = asArray(j.aggregate_dimensions).map((a) => ({
       Aggregate_ID: str(a.Aggregate_ID),
       Theme_IDs: str(a.Theme_IDs),
       Second_Order_Themes: str(a.Second_Order_Themes),
@@ -514,6 +563,7 @@ export class GioiaService {
       Description: str(a.Description),
       Example_Policies: str(a.Example_Policies),
     }));
+    return { dimensions, usage };
   }
 
   private validateCrossDocAggregate(j: Json, themes: { themeId: string }[]): string[] {
@@ -547,6 +597,8 @@ export class GioiaService {
     fileName: string,
     existing: ExistingContext,
     settings: AnalysisSettingsDto,
+    caseStudyName: string | undefined,
+    usage: StageUsage[],
   ): Promise<GioiaAnalysis> {
     // Single-call mode codes one document up to second-order themes, so it
     // reuses the concept and theme vocabulary (not aggregate dimensions).
@@ -556,6 +608,7 @@ export class GioiaService {
     });
     const systemPrompt = `${GIOIA_SYSTEM_PROMPT}\n\n${GIOIA_OUTPUT_CONTRACT}`;
     const userMessage = [
+      this.caseStudyContext(caseStudyName),
       `UPLOADED FILE NAME: ${fileName}`,
       `Derive the Document_ID from this file name where it already encodes one (e.g. "EU_01.pdf" -> "EU_01").`,
       "",
@@ -571,11 +624,12 @@ export class GioiaService {
     // One model for the whole analysis. Claude models get adaptive thinking +
     // effort; open Chutes models run plain (they handle their own reasoning).
     const ref = parseModelRef(settings.singleModel);
-    const parsed = await this.callModel(systemPrompt, userMessage, "single-call", ref, {
+    const call = await this.callModel(systemPrompt, userMessage, "single-call", ref, {
       think: ref.provider === "anthropic",
       effort: settings.effort,
     });
-    return parsed as unknown as GioiaAnalysis;
+    usage.push({ provider: ref.provider, model: ref.model, stage: "single-call", ...call.usage });
+    return call.parsed as unknown as GioiaAnalysis;
   }
 
   // ── Model call: route to the tier's provider, then tolerant JSON parse ──────
@@ -586,12 +640,12 @@ export class GioiaService {
     label: string,
     ref: ModelRef,
     opts: CallOpts,
-  ): Promise<Json> {
-    const raw =
+  ): Promise<{ parsed: Json; usage: CallUsage }> {
+    const { text, usage } =
       ref.provider === "anthropic"
         ? await this.callAnthropic(system, user, ref.model, opts, label)
         : await this.callChutes(system, user, ref.model, label);
-    return this.parseJson(raw, label);
+    return { parsed: this.parseJson(text, label), usage };
   }
 
   /** Claude via the Anthropic SDK — streaming, adaptive thinking when requested. */
@@ -601,7 +655,7 @@ export class GioiaService {
     model: string,
     opts: CallOpts,
     label: string,
-  ): Promise<string> {
+  ): Promise<{ text: string; usage: CallUsage }> {
     const client = this.getAnthropic();
     // Output-token ceiling. Every call streams (below), so large values are safe
     // from HTTP timeouts — the only limit is each model's hard output cap
@@ -639,7 +693,13 @@ export class GioiaService {
       }
       let out = "";
       for (const block of message.content) if (block.type === "text") out += block.text;
-      return out;
+      return {
+        text: out,
+        usage: {
+          inputTokens: message.usage?.input_tokens ?? 0,
+          outputTokens: message.usage?.output_tokens ?? 0,
+        },
+      };
     } catch (err) {
       if (err instanceof ServiceUnavailableException) throw err;
       const detail = err instanceof Error ? err.message : "unknown error";
@@ -651,7 +711,12 @@ export class GioiaService {
   }
 
   /** Open models via Chutes (OpenAI-compatible) — streaming JSON mode with fallback. */
-  private async callChutes(system: string, user: string, model: string, label: string): Promise<string> {
+  private async callChutes(
+    system: string,
+    user: string,
+    model: string,
+    label: string,
+  ): Promise<{ text: string; usage: CallUsage }> {
     const client = this.getClient();
     const base = {
       model,
@@ -662,6 +727,8 @@ export class GioiaService {
       max_tokens: 32000,
       temperature: 0.2,
       stream: true as const,
+      // Ask the provider to include token usage in the final stream chunk.
+      stream_options: { include_usage: true },
     };
     try {
       try {
@@ -686,13 +753,22 @@ export class GioiaService {
   private async stream(
     client: OpenAI,
     params: OpenAI.Chat.ChatCompletionCreateParamsStreaming,
-  ): Promise<string> {
+  ): Promise<{ text: string; usage: CallUsage }> {
     const stream = await client.chat.completions.create(params);
     let content = "";
+    // Usage arrives on the final chunk (empty choices) when include_usage is set;
+    // if the provider omits it, tokens stay 0 (cost 0) rather than failing.
+    let usage: CallUsage = { inputTokens: 0, outputTokens: 0 };
     for await (const chunk of stream) {
       content += chunk.choices[0]?.delta?.content ?? "";
+      if (chunk.usage) {
+        usage = {
+          inputTokens: chunk.usage.prompt_tokens ?? 0,
+          outputTokens: chunk.usage.completion_tokens ?? 0,
+        };
+      }
     }
-    return content;
+    return { text: content, usage };
   }
 
   private isBadRequest(err: unknown): boolean {

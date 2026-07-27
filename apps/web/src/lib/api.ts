@@ -13,6 +13,7 @@ import type {
   RegionCaseStudyDto,
   RegionDto,
   UpdateAnalysisSettingsDto,
+  UsageReportDto,
 } from "@gioia/dto";
 import { API_URL } from "./api-url";
 
@@ -168,6 +169,9 @@ export const api = {
 
   /** Read-only view of the system prompts used in the LLM calls (admin). */
   getPrompts: () => request<PromptsDto>("/analysis/prompts"),
+
+  /** Cost-tracking report (admin). */
+  getUsage: () => request<UsageReportDto>("/analysis/usage"),
 
   /** Update the model selection (admin only). */
   updateSettings: (patch: UpdateAnalysisSettingsDto) =>

@@ -6,6 +6,7 @@ import { GioiaService } from "./gioia.service";
 import { CodebookService } from "./codebook.service";
 import { CaseStudyService } from "./case-study.service";
 import { SettingsService } from "./settings.service";
+import { UsageService } from "./usage.service";
 import { AuthModule } from "../auth/auth.module";
 
 @Module({
@@ -18,6 +19,7 @@ import { AuthModule } from "../auth/auth.module";
     CodebookService,
     CaseStudyService,
     SettingsService,
+    UsageService,
   ],
 })
 export class AnalysisModule {}

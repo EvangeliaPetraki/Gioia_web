@@ -16,6 +16,7 @@ import type {
   PolicyDetailDto,
   PolicyListItemDto,
   UpdateAnalysisSettingsDto,
+  UsageReportDto,
 } from "@gioia/dto";
 import type { PromptsDto } from "@gioia/dto";
 import { PdfService } from "./pdf.service";
@@ -23,6 +24,7 @@ import { GioiaService } from "./gioia.service";
 import { CodebookService } from "./codebook.service";
 import { CaseStudyService } from "./case-study.service";
 import { SettingsService } from "./settings.service";
+import { UsageService } from "./usage.service";
 import { buildPromptView } from "./gioia.constants";
 import type { Viewer } from "../auth/current-user.decorator";
 
@@ -42,6 +44,7 @@ export class AnalysisService {
     private readonly gioia: GioiaService,
     private readonly codebook: CodebookService,
     private readonly caseStudies: CaseStudyService,
+    private readonly usage: UsageService,
   ) {}
 
   /**
@@ -61,7 +64,7 @@ export class AnalysisService {
       throw new BadRequestException("Select a case study to upload into.");
     }
     try {
-      const { regionCaseStudyId: rcsId, caseStudyTypeId } =
+      const { regionCaseStudyId: rcsId, caseStudyTypeId, caseStudyName } =
         await this.caseStudies.resolveCaseStudyType(regionCaseStudyId.trim(), viewer);
       const fileHash = createHash("sha256").update(buffer).digest("hex");
 
@@ -84,12 +87,19 @@ export class AnalysisService {
       // Fresh analysis, scoped to the case-study type for context reuse.
       const text = await this.pdf.extractText(buffer);
       const existingContext = await this.codebook.getExistingContext(caseStudyTypeId);
-      const analysis = await this.gioia.analyse(text, fileName, existingContext);
+      const { analysis, usage } = await this.gioia.analyse(
+        text,
+        fileName,
+        existingContext,
+        caseStudyName,
+      );
       const { documentId, newThemes } = await this.codebook.append(analysis, fileName, {
         caseStudyTypeId,
         fileHash,
       });
       await this.caseStudies.linkSelection(rcsId, documentId, fileName);
+      // Ledger: the full cost of analysing this file (all stages + repairs).
+      await this.usage.record({ kind: "analysis", events: usage, documentId, caseStudyTypeId });
 
       return {
         documentId,
@@ -192,6 +202,11 @@ export class AnalysisService {
     return this.settings.getSettingsResponse();
   }
 
+  /** Cost-tracking report for the admin usage page. */
+  getUsageReport(): Promise<UsageReportDto> {
+    return this.usage.getReport();
+  }
+
   /** Read-only view of the system prompts used in the LLM calls (admin). */
   async getPrompts(): Promise<PromptsDto> {
     const settings = await this.settings.getSettings();
@@ -215,14 +230,20 @@ export class AnalysisService {
     if (ids.length === 0) {
       throw new BadRequestException("This case study has no analysed files yet.");
     }
-    const result = await this.aggregateDimensions(ids);
+    const result = await this.aggregateDimensions(ids, regionCaseStudyId);
     // Persist so the case study's codebook is stable and downloadable.
     await this.codebook.saveCaseStudyAggregate(regionCaseStudyId, result);
     return result;
   }
 
-  /** Synthesise aggregate dimensions across the selected documents' themes. */
-  async aggregateDimensions(documentIds: string[]): Promise<CrossDocumentAggregateDto> {
+  /**
+   * Synthesise aggregate dimensions across the selected documents' themes. When
+   * `regionCaseStudyId` is given, the call's cost is attributed to it.
+   */
+  async aggregateDimensions(
+    documentIds: string[],
+    regionCaseStudyId?: string,
+  ): Promise<CrossDocumentAggregateDto> {
     const ids = [...new Set(documentIds.map((s) => s.trim()).filter(Boolean))];
     if (ids.length === 0) {
       throw new BadRequestException("Select at least one analysed document.");
@@ -233,7 +254,9 @@ export class AnalysisService {
         "The selected documents have no second-order themes to aggregate.",
       );
     }
-    const dimensions = await this.gioia.aggregateAcrossDocuments(ids, themes);
+    const { dimensions, usage } = await this.gioia.aggregateAcrossDocuments(ids, themes);
+    // Ledger: attribute this file-less call's cost to the case study (if given).
+    await this.usage.record({ kind: "aggregate", events: usage, regionCaseStudyId });
     const dtoDimensions = dimensions.map((d) => ({
       aggregateId: d.Aggregate_ID,
       aggregateDimension: d.Aggregate_Dimension,

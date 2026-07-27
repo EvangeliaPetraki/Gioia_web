@@ -177,6 +177,31 @@ model SecondOrderTheme {
   @@map("second_order_themes")
 }
 
+// Append-only ledger of every LLM call, for cost tracking. Each row is one
+// model request (a pipeline stage, a repair retry, or an aggregate synthesis).
+// `documentId` is set for per-file analysis calls; `regionCaseStudyId` for the
+// file-less aggregate calls. `costUsd` is computed at write time from the price
+// table so historical spend survives later price changes. No FKs — a ledger
+// must not be cascade-deleted with the documents/case studies it references.
+model UsageEvent {
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now())
+  kind              String // "analysis" | "aggregate"
+  stage             String // e.g. "stage2-concepts", "cross-doc-aggregate", "stage3-themes-repair"
+  provider          String // "anthropic" | "chutes"
+  model             String
+  inputTokens       Int      @default(0)
+  outputTokens      Int      @default(0)
+  costUsd           Float    @default(0)
+  documentId        String? // per-file analysis calls
+  regionCaseStudyId String? // aggregate calls
+  caseStudyTypeId   String?
+
+  @@index([documentId])
+  @@index([regionCaseStudyId])
+  @@map("usage_events")
+}
+
 // Singleton row holding the admin-selected model configuration for the pipeline
 // (replaces the env-driven MODEL_PROFILE / PIPELINE_MODE / MODEL_EFFORT).
 model AnalysisSetting {

@@ -279,6 +279,7 @@ export default function DashboardPage() {
               <MenuLink href="/admin/users">Manage users</MenuLink>
               <MenuLink href="/admin/settings">Model settings</MenuLink>
               <MenuLink href="/admin/prompts">View prompts</MenuLink>
+              <MenuLink href="/admin/usage">Usage &amp; cost</MenuLink>
             </Menu>
           )}
           <Button variant="ghost" onClick={() => void authClient.signOut()}>

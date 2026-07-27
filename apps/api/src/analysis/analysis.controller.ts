@@ -33,6 +33,7 @@ import type {
   PromptsDto,
   RegionCaseStudyDto,
   RegionDto,
+  UsageReportDto,
 } from "@gioia/dto";
 import {
   CreateCaseStudyTypeDto,
@@ -235,6 +236,13 @@ export class AnalysisController {
   @UseGuards(AdminGuard)
   getPrompts(): Promise<PromptsDto> {
     return this.analysis.getPrompts();
+  }
+
+  /** Cost-tracking report: total spend, per-case-study and per-file costs (admin). */
+  @Get("usage")
+  @UseGuards(AdminGuard)
+  getUsage(): Promise<UsageReportDto> {
+    return this.analysis.getUsageReport();
   }
 
   /** Synthesise aggregate dimensions across selected documents (admin only). */
