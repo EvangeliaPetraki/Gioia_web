@@ -60,6 +60,10 @@ export default function DashboardPage() {
   const [caseStudyId, setCaseStudyId] = useState("");
   const [policies, setPolicies] = useState<PolicyListItemDto[]>([]);
   const [dragging, setDragging] = useState(false);
+  // "Force re-analyse": when on, a re-uploaded file already analysed in this
+  // case study is re-run through the pipeline instead of being reused/skipped.
+  const [forceReanalyze, setForceReanalyze] = useState(false);
+  const [reanalyzeNotice, setReanalyzeNotice] = useState<{ force: boolean; count: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const processing = useRef(false);
   const router = useRouter();
@@ -152,7 +156,7 @@ export default function DashboardPage() {
 
   // Authoritative job list (incl. the File + its target case study) for the
   // async pump loop; `setJobs` mirrors it for rendering.
-  const jobsRef = useRef<(Job & { file: File; caseStudyId: string })[]>([]);
+  const jobsRef = useRef<(Job & { file: File; caseStudyId: string; forceReanalyze: boolean })[]>([]);
 
   const update = useCallback((id: string, patch: Partial<Job>) => {
     jobsRef.current = jobsRef.current.map((j) => (j.id === id ? { ...j, ...patch } : j));
@@ -169,7 +173,7 @@ export default function DashboardPage() {
         if (!next) break;
         update(next.id, { status: "processing" });
         try {
-          const summary = await api.analysePdf(next.file, next.caseStudyId);
+          const summary = await api.analysePdf(next.file, next.caseStudyId, next.forceReanalyze);
           update(next.id, { status: "done", summary });
           await refreshPolicies();
           await refreshCatalog();
@@ -192,18 +196,29 @@ export default function DashboardPage() {
         (f) => f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf"),
       );
       if (pdfs.length === 0) return;
-      const newJobs = pdfs.map((file): Job & { file: File; caseStudyId: string } => ({
-        id: `job_${++jobSeq}`,
-        name: file.name,
-        status: "queued",
-        file,
-        caseStudyId,
-      }));
+      // Snapshot the toggle at queue time — each job re-analyses (or not)
+      // according to the setting in effect when it was added to the queue.
+      const newJobs = pdfs.map(
+        (file): Job & { file: File; caseStudyId: string; forceReanalyze: boolean } => ({
+          id: `job_${++jobSeq}`,
+          name: file.name,
+          status: "queued",
+          file,
+          caseStudyId,
+          forceReanalyze,
+        }),
+      );
       jobsRef.current = [...jobsRef.current, ...newJobs];
-      setJobs((prev) => [...prev, ...newJobs.map(({ file: _f, caseStudyId: _c, ...j }) => j)]);
+      setJobs((prev) => [
+        ...prev,
+        ...newJobs.map(({ file: _f, caseStudyId: _c, forceReanalyze: _r, ...j }) => j),
+      ]);
+      // Tell the user, once per batch, whether already-analysed files in it
+      // will be reused/skipped or re-analysed.
+      setReanalyzeNotice({ force: forceReanalyze, count: pdfs.length });
       // Analysis does not start automatically — the user presses "Analyse".
     },
-    [caseStudyId],
+    [caseStudyId, forceReanalyze],
   );
 
   const onDrop = (e: React.DragEvent) => {
@@ -280,6 +295,7 @@ export default function DashboardPage() {
               <MenuLink href="/admin/settings">Model settings</MenuLink>
               <MenuLink href="/admin/prompts">View prompts</MenuLink>
               <MenuLink href="/admin/usage">Usage &amp; cost</MenuLink>
+              <MenuLink href="/admin/errors">Errors</MenuLink>
             </Menu>
           )}
           <Button variant="ghost" onClick={() => void authClient.signOut()}>
@@ -325,18 +341,29 @@ export default function DashboardPage() {
               .
             </p>
           ) : (
-            <select
-              className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-              value={caseStudyId}
-              onChange={(e) => selectCaseStudy(e.target.value)}
-            >
-              <option value="">Select a region &amp; case study…</option>
-              {caseStudyOptions.map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.label} ({o.documentCount})
-                </option>
-              ))}
-            </select>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <select
+                className="h-10 flex-1 rounded-md border border-input bg-background px-3 text-sm"
+                value={caseStudyId}
+                onChange={(e) => selectCaseStudy(e.target.value)}
+              >
+                <option value="">Select a region &amp; case study…</option>
+                {caseStudyOptions.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label} ({o.documentCount})
+                  </option>
+                ))}
+              </select>
+              <label htmlFor="force-reanalyze" className="flex shrink-0 items-center gap-2">
+                <Switch id="force-reanalyze" checked={forceReanalyze} onChange={setForceReanalyze} />
+                <span className="text-sm leading-tight">
+                  Force re-analysis
+                  <span className="block text-xs text-muted-foreground">
+                    Re-run already-analysed files instead of reusing them
+                  </span>
+                </span>
+              </label>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -381,6 +408,21 @@ export default function DashboardPage() {
               }}
             />
           </div>
+          {reanalyzeNotice && (
+            <p
+              className={`mt-4 text-sm ${
+                reanalyzeNotice.force ? "text-amber-600" : "text-muted-foreground"
+              }`}
+            >
+              {reanalyzeNotice.force
+                ? `⚠ Force re-analysis is ON — of the ${reanalyzeNotice.count} file${
+                    reanalyzeNotice.count === 1 ? "" : "s"
+                  } just added, any already analysed in this case study will be re-run and replaced, not reused.`
+                : `Force re-analysis is OFF — of the ${reanalyzeNotice.count} file${
+                    reanalyzeNotice.count === 1 ? "" : "s"
+                  } just added, any already analysed in this case study will be reused, not re-analysed.`}
+            </p>
+          )}
           {(queuedCount > 0 || isProcessing) && (
             <div className="mt-4 flex items-center justify-between gap-4">
               <p className="text-sm text-muted-foreground">
@@ -407,6 +449,7 @@ export default function DashboardPage() {
                   <CardTitle className="text-base">{job.name}</CardTitle>
                   <div className="flex items-center gap-2">
                     {job.summary?.reused && <Badge variant="secondary">Reused</Badge>}
+                    {job.summary?.reanalyzed && <Badge variant="secondary">Re-analysed</Badge>}
                     <StatusBadge status={job.status} />
                   </div>
                 </div>
@@ -414,6 +457,7 @@ export default function DashboardPage() {
                   <CardDescription>
                     {job.summary.documentId} · {String(job.summary.governanceLevel)}
                     {job.summary.reused ? " · linked from an earlier analysis" : ""}
+                    {job.summary.reanalyzed ? " · replaced the earlier analysis" : ""}
                   </CardDescription>
                 )}
               </CardHeader>
@@ -535,6 +579,36 @@ function StatusBadge({ status }: { status: JobStatus }) {
   };
   const { label, variant } = map[status];
   return <Badge variant={variant}>{label}</Badge>;
+}
+
+/** A dependency-free on/off switch, styled to match the rest of the dashboard. */
+function Switch({
+  id,
+  checked,
+  onChange,
+}: {
+  id?: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      id={id}
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+        checked ? "bg-primary" : "bg-input"
+      }`}
+    >
+      <span
+        className={`inline-block h-4 w-4 transform rounded-full bg-background transition-transform ${
+          checked ? "translate-x-6" : "translate-x-1"
+        }`}
+      />
+    </button>
+  );
 }
 
 /** A lightweight dropdown menu (no external dependency). Closes on outside click. */

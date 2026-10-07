@@ -7,6 +7,7 @@ import { CodebookService } from "./codebook.service";
 import { CaseStudyService } from "./case-study.service";
 import { SettingsService } from "./settings.service";
 import { UsageService } from "./usage.service";
+import { AnalysisErrorService } from "./analysis-error.service";
 import { AuthModule } from "../auth/auth.module";
 
 @Module({
@@ -20,6 +21,7 @@ import { AuthModule } from "../auth/auth.module";
     CaseStudyService,
     SettingsService,
     UsageService,
+    AnalysisErrorService,
   ],
 })
 export class AnalysisModule {}

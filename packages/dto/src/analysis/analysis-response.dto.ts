@@ -27,6 +27,12 @@ export interface AnalysisSummaryDto {
    * and the existing analysis was reused (linked) instead of re-running the model.
    */
   reused: boolean;
+  /**
+   * True when this file had already been analysed under the same case-study type
+   * and, because "force re-analyse" was on, the stored analysis was replaced by a
+   * fresh model run instead of being reused.
+   */
+  reanalyzed: boolean;
 }
 
 /** One row in the analysed-policies catalogue (GET /analysis/policies). */

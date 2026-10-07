@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import {
   BadRequestException,
   HttpException,
@@ -7,6 +8,7 @@ import {
   ServiceUnavailableException,
 } from "@nestjs/common";
 import type {
+  AnalysisErrorDto,
   AnalysisSettingsDto,
   AnalysisSettingsResponseDto,
   AnalysisSummaryDto,
@@ -25,6 +27,7 @@ import { CodebookService } from "./codebook.service";
 import { CaseStudyService } from "./case-study.service";
 import { SettingsService } from "./settings.service";
 import { UsageService } from "./usage.service";
+import { AnalysisErrorService } from "./analysis-error.service";
 import { buildPromptView } from "./gioia.constants";
 import type { Viewer } from "../auth/current-user.decorator";
 
@@ -33,6 +36,12 @@ const splitIds = (s: string) =>
     .split(/[;,]/)
     .map((x) => x.trim())
     .filter(Boolean);
+
+/** The model's raw text an error was built from (see gioia.service.ts's parseJson), if any. */
+const rawOutputOf = (e: unknown): string | null => {
+  const cause = e instanceof Error ? (e as Error & { cause?: unknown }).cause : undefined;
+  return typeof cause === "string" ? cause : null;
+};
 
 @Injectable()
 export class AnalysisService {
@@ -45,20 +54,24 @@ export class AnalysisService {
     private readonly codebook: CodebookService,
     private readonly caseStudies: CaseStudyService,
     private readonly usage: UsageService,
+    private readonly errors: AnalysisErrorService,
   ) {}
 
   /**
    * Analyse an uploaded PDF within a region's case study. If the same file
    * (by content hash) was already analysed under this case-study *type* — even
-   * for another region — that analysis is reused: it is linked into this case
-   * study and the model is not re-run. Otherwise the file is analysed once,
-   * stored under the case-study type, and linked.
+   * for another region — that analysis is reused by default: it is linked into
+   * this case study and the model is not re-run. When `forceReanalyze` is on,
+   * an existing match is instead re-run and replaced in place. Otherwise (no
+   * existing match) the file is analysed once, stored under the case-study
+   * type, and linked.
    */
   async analyseDocument(
     fileName: string,
     buffer: Buffer,
     regionCaseStudyId: string,
     viewer: Viewer,
+    forceReanalyze = false,
   ): Promise<AnalysisSummaryDto> {
     if (!regionCaseStudyId?.trim()) {
       throw new BadRequestException("Select a case study to upload into.");
@@ -68,9 +81,11 @@ export class AnalysisService {
         await this.caseStudies.resolveCaseStudyType(regionCaseStudyId.trim(), viewer);
       const fileHash = createHash("sha256").update(buffer).digest("hex");
 
-      // Reuse path: this file was already analysed under this case-study type.
       const existing = await this.codebook.findByHash(fileHash, caseStudyTypeId);
-      if (existing) {
+
+      // Reuse path (default): this file was already analysed under this
+      // case-study type and re-analysis was not requested.
+      if (existing && !forceReanalyze) {
         await this.caseStudies.linkSelection(rcsId, existing.documentId, fileName);
         const counts = await this.codebook.countsFor(existing.documentId);
         return {
@@ -81,10 +96,12 @@ export class AnalysisService {
           policySummary: existing.policySummary,
           workbookFilename: this.codebook.filename,
           reused: true,
+          reanalyzed: false,
         };
       }
 
-      // Fresh analysis, scoped to the case-study type for context reuse.
+      // Fresh model run, scoped to the case-study type for context reuse —
+      // either a genuinely new file, or an existing one being force-re-analysed.
       const text = await this.pdf.extractText(buffer);
       const existingContext = await this.codebook.getExistingContext(caseStudyTypeId);
       const { analysis, usage } = await this.gioia.analyse(
@@ -93,13 +110,49 @@ export class AnalysisService {
         existingContext,
         caseStudyName,
       );
-      const { documentId, newThemes } = await this.codebook.append(analysis, fileName, {
-        caseStudyTypeId,
-        fileHash,
-      });
+      const scope = { caseStudyTypeId, fileHash };
+      let reusedDocument: typeof existing = null;
+      let result: { documentId: string; newThemes: number };
+      let reanalyzed = Boolean(existing);
+      try {
+        result = existing
+          ? await this.codebook.replace(existing.documentId, analysis, fileName, scope)
+          : await this.codebook.append(analysis, fileName, scope);
+      } catch (e) {
+        // Another upload may have saved this file while the model was running.
+        // Only recover a create collision with a matching file/type record;
+        // update failures and unrelated database errors must still surface.
+        if (existing || !(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") {
+          throw e;
+        }
+        const concurrent = await this.codebook.findByHash(fileHash, caseStudyTypeId);
+        if (!concurrent) throw e;
+        if (forceReanalyze) {
+          result = await this.codebook.replace(concurrent.documentId, analysis, fileName, scope);
+          reanalyzed = true;
+        } else {
+          reusedDocument = concurrent;
+          result = { documentId: concurrent.documentId, newThemes: 0 };
+        }
+      }
+      const { documentId, newThemes } = result;
       await this.caseStudies.linkSelection(rcsId, documentId, fileName);
       // Ledger: the full cost of analysing this file (all stages + repairs).
       await this.usage.record({ kind: "analysis", events: usage, documentId, caseStudyTypeId });
+
+      if (reusedDocument) {
+        const counts = await this.codebook.countsFor(documentId);
+        return {
+          documentId,
+          policyName: reusedDocument.policyName,
+          governanceLevel: reusedDocument.governanceLevel,
+          counts: { ...counts, newThemes: 0 },
+          policySummary: reusedDocument.policySummary,
+          workbookFilename: this.codebook.filename,
+          reused: true,
+          reanalyzed: false,
+        };
+      }
 
       return {
         documentId,
@@ -114,8 +167,19 @@ export class AnalysisService {
         policySummary: analysis.policy_summary,
         workbookFilename: this.codebook.filename,
         reused: false,
+        reanalyzed,
       };
     } catch (e) {
+      const message = e instanceof Error ? e.message : "unexpected error";
+      // Best-effort: so the admin can inspect why this file failed (including
+      // the model's raw output, when the failure was unparseable JSON)
+      // without digging through server logs.
+      await this.errors.record({
+        fileName,
+        message,
+        rawOutput: rawOutputOf(e),
+        regionCaseStudyId: regionCaseStudyId.trim(),
+      });
       // Intentional 4xx/5xx (bad request, model unavailable, forbidden…) pass
       // through untouched. Anything else is an unexpected bug — log the full
       // stack (so it shows in the server console) and surface a real message
@@ -124,9 +188,7 @@ export class AnalysisService {
       this.logger.error(
         `analyseDocument failed for "${fileName}": ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`,
       );
-      throw new ServiceUnavailableException(
-        `Analysis failed: ${e instanceof Error ? e.message : "unexpected error"}`,
-      );
+      throw new ServiceUnavailableException(`Analysis failed: ${message}`);
     }
   }
 
@@ -205,6 +267,10 @@ export class AnalysisService {
   /** Cost-tracking report for the admin usage page. */
   getUsageReport(): Promise<UsageReportDto> {
     return this.usage.getReport();
+  }
+
+  getErrorLog(): Promise<AnalysisErrorDto[]> {
+    return this.errors.list();
   }
 
   /** Read-only view of the system prompts used in the LLM calls (admin). */

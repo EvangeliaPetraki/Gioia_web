@@ -328,7 +328,7 @@ Respond with a SINGLE JSON object and nothing else — no markdown, no code fenc
   "refinement_summary": "",
   "research_question_memo": { "RQ_Focus": "", "Analytical_Memo": "" }
 }
-All values are strings (multi-value fields are semicolon-separated). Use "" only when something is genuinely undeterminable. Governance_Level must be exactly one of: ${GOVERNANCE_LEVELS.join(", ")}. A single document is coded only up to second-order themes — do not output aggregate dimensions or a Gioia data structure.`;
+All values are strings (multi-value fields are semicolon-separated). Use "" only when something is genuinely undeterminable. Governance_Level must be exactly one of: ${GOVERNANCE_LEVELS.join(", ")}. A single document is coded only up to second-order themes — do not output aggregate dimensions or a Gioia data structure. Every verbatim excerpt or quote you copy into a JSON string MUST be valid JSON: escape every literal double-quote as \\" and every line break as \\n — never paste a raw quote mark or newline into a string value.`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STAGED PIPELINE PROMPTS (PIPELINE_MODE=staged)
@@ -367,7 +367,7 @@ LANGUAGE POLICY
 Detect the document's original language. Keep IN THE ORIGINAL LANGUAGE (do not translate): every verbatim excerpt (Excerpt_Text), every first-order concept label (First_Order_Concept) and its repetitions, and Example_Quote. Produce everything researcher-generated IN ENGLISH: metadata, all notes, second-order themes, summaries, and the memo. If the document is already in English, every field is in English.
 
 OUTPUT RULE
-Every populated field must contain substantive analytical content — never placeholder text ("TBD", "N/A", "Concepts", etc.). If something is genuinely undeterminable, use an empty string. Respond with a SINGLE JSON object and nothing else — no markdown, no code fences, no commentary.`;
+Every populated field must contain substantive analytical content — never placeholder text ("TBD", "N/A", "Concepts", etc.). If something is genuinely undeterminable, use an empty string. Respond with a SINGLE JSON object and nothing else — no markdown, no code fences, no commentary. Every verbatim excerpt or quote you copy into a JSON string MUST be valid JSON: escape every literal double-quote as \\" and every line break as \\n — never paste a raw quote mark or newline into a string value.`;
 
 const STAGE1_INSTRUCTIONS = `TASK — METADATA, RAW EXCERPTS, AND POLICY SUMMARY (Gioia Steps 1, 2, 8).
 

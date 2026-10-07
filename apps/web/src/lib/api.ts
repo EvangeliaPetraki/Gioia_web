@@ -1,4 +1,5 @@
 import type {
+  AnalysisErrorDto,
   AnalysisSettingsDto,
   AnalysisSettingsResponseDto,
   AnalysisSummaryDto,
@@ -49,11 +50,19 @@ export function caseStudyWorkbookDownloadUrl(regionCaseStudyId: string): string 
 }
 
 export const api = {
-  /** Upload one PDF into a region's case study and run (or reuse) the analysis. */
-  async analysePdf(file: File, regionCaseStudyId: string): Promise<AnalysisSummaryDto> {
+  /**
+   * Upload one PDF into a region's case study and run (or reuse, or — when
+   * `forceReanalyze` is on — re-run and replace) the analysis.
+   */
+  async analysePdf(
+    file: File,
+    regionCaseStudyId: string,
+    forceReanalyze = false,
+  ): Promise<AnalysisSummaryDto> {
     const form = new FormData();
     form.append("file", file);
     form.append("regionCaseStudyId", regionCaseStudyId);
+    form.append("forceReanalyze", String(forceReanalyze));
     const res = await fetch(`${API_URL}/analysis/upload`, {
       method: "POST",
       credentials: "include",
@@ -172,6 +181,9 @@ export const api = {
 
   /** Cost-tracking report (admin). */
   getUsage: () => request<UsageReportDto>("/analysis/usage"),
+
+  /** Recent failed analyses, with the model's raw output when available (admin). */
+  getErrors: () => request<AnalysisErrorDto[]>("/analysis/errors"),
 
   /** Update the model selection (admin only). */
   updateSettings: (patch: UpdateAnalysisSettingsDto) =>

@@ -20,6 +20,7 @@ import {
 import { FileInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 import type {
+  AnalysisErrorDto,
   AnalysisSettingsDto,
   AnalysisSettingsResponseDto,
   AnalysisSummaryDto,
@@ -76,6 +77,7 @@ export class AnalysisController {
   async upload(
     @CurrentUser() user: SessionUser,
     @Body("regionCaseStudyId") regionCaseStudyId?: string,
+    @Body("forceReanalyze") forceReanalyze?: string,
     @UploadedFile() file?: Express.Multer.File,
   ): Promise<AnalysisSummaryDto> {
     if (!file) {
@@ -89,6 +91,7 @@ export class AnalysisController {
       file.buffer,
       regionCaseStudyId,
       toViewer(user),
+      forceReanalyze === "true",
     );
   }
 
@@ -243,6 +246,13 @@ export class AnalysisController {
   @UseGuards(AdminGuard)
   getUsage(): Promise<UsageReportDto> {
     return this.analysis.getUsageReport();
+  }
+
+  /** Recent failed analyses, with the model's raw output when available (admin). */
+  @Get("errors")
+  @UseGuards(AdminGuard)
+  getErrors(): Promise<AnalysisErrorDto[]> {
+    return this.analysis.getErrorLog();
   }
 
   /** Synthesise aggregate dimensions across selected documents (admin only). */

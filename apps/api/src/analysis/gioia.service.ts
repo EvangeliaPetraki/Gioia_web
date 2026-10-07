@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import { jsonrepair } from "jsonrepair";
 import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import type {
@@ -323,7 +324,9 @@ export class GioiaService {
   }
 
   /** Run one stage, validate, repair once on failure, then fail loudly. Every
-   * model call (including the repair) is appended to `usage` for cost tracking. */
+   * model call (including the repair) is appended to `usage` for cost tracking.
+   * A raw JSON-parse failure is treated the same as a validation failure — it
+   * also gets the one repair retry, instead of failing the document outright. */
   private async runStage(
     ref: ModelRef,
     opts: CallOpts,
@@ -334,22 +337,38 @@ export class GioiaService {
     usage: StageUsage[],
   ): Promise<Json> {
     const user = buildUser();
-    let call = await this.callModel(system, user, label, ref, opts);
-    usage.push({ provider: ref.provider, model: ref.model, stage: label, ...call.usage });
-    let errs = validate(call.parsed);
-    if (errs.length === 0) return call.parsed;
+    let parsed: Json;
+    let errs: string[];
+    try {
+      const call = await this.callModel(system, user, label, ref, opts);
+      usage.push({ provider: ref.provider, model: ref.model, stage: label, ...call.usage });
+      parsed = call.parsed;
+      errs = validate(parsed);
+    } catch (err) {
+      if (!this.isUnparseableOutput(err)) throw err;
+      parsed = {};
+      errs = [err.message];
+    }
+    if (errs.length === 0) return parsed;
 
     this.logger.warn(`${label}: ${errs.length} validation issue(s); repairing. First: ${errs[0]}`);
     const repairUser = `${user}\n\nA PREVIOUS ATTEMPT FAILED THESE VALIDATION CHECKS:\n- ${errs.join(
       "\n- ",
     )}\n\nReturn a corrected JSON object that fixes every issue. Output JSON only.`;
-    call = await this.callModel(system, repairUser, `${label}-repair`, ref, opts);
+    const call = await this.callModel(system, repairUser, `${label}-repair`, ref, opts);
     usage.push({ provider: ref.provider, model: ref.model, stage: `${label}-repair`, ...call.usage });
     errs = validate(call.parsed);
     if (errs.length === 0) return call.parsed;
 
     throw new ServiceUnavailableException(
       `${label} failed validation after repair: ${errs.slice(0, 6).join("; ")}`,
+    );
+  }
+
+  private isUnparseableOutput(err: unknown): err is ServiceUnavailableException {
+    return (
+      err instanceof ServiceUnavailableException &&
+      /malformed JSON|empty response/.test(err.message)
     );
   }
 
@@ -782,17 +801,138 @@ export class GioiaService {
       throw new ServiceUnavailableException(`The analysis model returned an empty response (${label}).`);
     }
     const candidates = [text, this.stripFences(text), this.firstJsonObject(text)];
+    let lastCandidate = text;
+    let lastErr: unknown;
     for (const candidate of candidates) {
       if (!candidate) continue;
       try {
         const obj = JSON.parse(candidate) as unknown;
         if (obj && typeof obj === "object") return obj as Json;
-      } catch {
-        /* try next candidate */
+      } catch (e) {
+        lastCandidate = candidate;
+        lastErr = e;
       }
     }
-    this.logger.error(`Could not parse ${label} JSON. First 300 chars: ${text.slice(0, 300)}`);
-    throw new ServiceUnavailableException(`The analysis model returned malformed JSON (${label}).`);
+    // Last resort: repair common LLM JSON mistakes. The most frequent one is a
+    // verbatim excerpt (often in another language) where the model closes a
+    // typographic quotation with a literal, unescaped " instead of \" —
+    // "copy this excerpt verbatim" and "escape embedded quotes" pull against
+    // each other on that exact character, and it can recur many times in one
+    // document. That defeats both the one-shot repair retry in runStage (the
+    // model tends to reproduce the same habit) and jsonrepair's general-purpose
+    // heuristics on their own, so normalise stray quotes first, then fall back
+    // to jsonrepair alone and to both combined.
+    const isolated = this.firstJsonObject(text) ?? lastCandidate;
+    const quoteFixed = this.escapeStrayQuotes(isolated);
+    const repairs: Array<() => string> = [
+      () => quoteFixed,
+      () => jsonrepair(isolated),
+      () => jsonrepair(quoteFixed),
+    ];
+    for (const repair of repairs) {
+      try {
+        const obj = JSON.parse(repair()) as unknown;
+        if (obj && typeof obj === "object") {
+          this.logger.warn(`${label}: model output was malformed JSON, auto-repaired.`);
+          return obj as Json;
+        }
+      } catch {
+        /* try the next repair strategy */
+      }
+    }
+    // JSON.parse's own message names the failure position ("... at position N")
+    // for a plain SyntaxError — pinpoint that spot instead of just dumping the
+    // start of a (possibly very long) response that broke somewhere deep inside.
+    const at = this.jsonErrorPosition(lastErr);
+    const near = at != null ? this.snippetAround(lastCandidate, at) : null;
+    this.logger.error(
+      `Could not parse ${label} JSON. ` +
+        (near ? `Near position ${at}: ${near}` : `First 300 chars: ${text.slice(0, 300)}`),
+    );
+    throw new ServiceUnavailableException(
+      `The analysis model returned malformed JSON (${label}).` +
+        (near ? ` Broke near: ${near}` : ""),
+      { cause: text },
+    );
+  }
+
+  private jsonErrorPosition(err: unknown): number | null {
+    const m = err instanceof Error ? /position (\d+)/.exec(err.message) : null;
+    return m ? Number(m[1]) : null;
+  }
+
+  private snippetAround(text: string, at: number, radius = 200): string {
+    const start = Math.max(0, at - radius);
+    const end = Math.min(text.length, at + radius);
+    return `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
+  }
+
+  /**
+   * Escape '"' characters that occur inside a JSON string but aren't actually
+   * closing it — the recurring case is a verbatim excerpt where the model
+   * transcribes a typographic quotation (e.g. Romanian „…") using a literal
+   * ASCII '"' for the closer instead of escaping it. Walks the text tracking
+   * whether we're inside a JSON string; a '"' encountered there is trusted as
+   * the real end only when what follows it (see `looksLikeStringEnd`) looks
+   * like genuine JSON syntax, not more prose.
+   */
+  private escapeStrayQuotes(text: string): string {
+    let out = "";
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (!inString) {
+        out += ch;
+        if (ch === '"') inString = true;
+        continue;
+      }
+      if (escaped) {
+        out += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        out += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        if (this.looksLikeStringEnd(text, i)) {
+          out += ch;
+          inString = false;
+        } else {
+          out += '\\"';
+        }
+        continue;
+      }
+      out += ch;
+    }
+    return out;
+  }
+
+  /**
+   * Whether the '"' at `quoteIndex` plausibly ends a JSON string, judged by
+   * what follows it (skipping whitespace). `: } ]` or end-of-input are
+   * unambiguous. A `,` is trusted only when the token after it also looks
+   * like the start of a real JSON value or key — otherwise (ordinary prose
+   * continuing, as in a Romanian «…», care a mai…» quotation, where the comma
+   * is just sentence punctuation) this quote is literal content the model
+   * forgot to escape, not a real string boundary.
+   */
+  private looksLikeStringEnd(text: string, quoteIndex: number): boolean {
+    let j = quoteIndex + 1;
+    while (j < text.length && /\s/.test(text[j])) j++;
+    const next = text[j];
+    if (next === undefined || next === "}" || next === "]" || next === ":") return true;
+    if (next !== ",") return false;
+    j++;
+    while (j < text.length && /\s/.test(text[j])) j++;
+    const after = text[j];
+    if (after === undefined) return false;
+    if (after === '"' || after === "{" || after === "[") return true;
+    if (/[-\d]/.test(after)) return true;
+    return /^(true|false|null)\b/.test(text.slice(j));
   }
 
   private stripFences(text: string): string {

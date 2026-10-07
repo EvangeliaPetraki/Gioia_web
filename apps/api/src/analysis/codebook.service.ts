@@ -524,43 +524,92 @@ export class CodebookService implements OnModuleInit {
       ).map((t) => t.themeId),
     );
 
-    await this.persist(analysis, documentId, sourceFile, scope);
+    await this.persist(analysis, documentId, sourceFile, scope, "create");
 
     const newThemes = analysis.second_order_themes.filter((t) => !priorThemeIds.has(t.Theme_ID)).length;
     this.logger.log(`Stored ${documentId} in the database.`);
     return { documentId, newThemes };
   }
 
-  /** Insert one document and all its child rows in a single transaction. */
+  /**
+   * Re-run an analysis in place ("force re-analyse"): keeps the existing
+   * document's identity (so FileSelections into other regions/case studies that
+   * share this file+case-study-type stay valid) and replaces every derived field
+   * and child row with the fresh output.
+   */
+  async replace(
+    documentId: string,
+    analysis: GioiaAnalysis,
+    sourceFile: string,
+    scope: AppendScope,
+  ): Promise<AppendResult> {
+    // Force the fresh output onto the existing document's id, even if the model
+    // assigned a different Document_ID this time — otherwise FileSelections
+    // pointing at the old id would dangle.
+    const incomingId = analysis.policy_metadata.Document_ID?.trim();
+    analysis =
+      incomingId && incomingId !== documentId ? this.rePrefix(analysis, incomingId, documentId) : analysis;
+
+    // "New" themes are judged against every OTHER document in the case study —
+    // this document's own (about-to-be-replaced) themes don't count as "prior".
+    const priorThemeIds = new Set(
+      (
+        await this.prisma.secondOrderTheme.findMany({
+          where: { document: { caseStudyTypeId: scope.caseStudyTypeId }, documentId: { not: documentId } },
+          select: { themeId: true },
+        })
+      ).map((t) => t.themeId),
+    );
+
+    await this.persist(analysis, documentId, sourceFile, scope, "update");
+
+    const newThemes = analysis.second_order_themes.filter((t) => !priorThemeIds.has(t.Theme_ID)).length;
+    this.logger.log(`Re-analysed and replaced ${documentId} in the database.`);
+    return { documentId, newThemes };
+  }
+
+  /** Insert (or, in "update" mode, replace) one document and its child rows in a single transaction. */
   private async persist(
     analysis: GioiaAnalysis,
     documentId: string,
     sourceFile: string,
     scope: AppendScope,
+    mode: "create" | "update",
   ): Promise<void> {
     const meta = analysis.policy_metadata;
     const dateAnalysed = new Date().toISOString().slice(0, 10);
+    const fields = {
+      policyName: meta.Policy_Name ?? "",
+      countryOrRegion: meta.Country_or_Region ?? "",
+      governanceLevel: String(meta.Governance_Level ?? ""),
+      policyYear: meta.Policy_Year ?? "",
+      issuingActor: meta.Issuing_Actor ?? "",
+      policyType: meta.Policy_Type ?? "",
+      sourceFile,
+      dateAnalysed,
+      policySummary: analysis.policy_summary ?? "",
+      refinementSummary: analysis.refinement_summary ?? "",
+      rqFocus: analysis.research_question_memo?.RQ_Focus ?? "",
+      analyticalMemo: analysis.research_question_memo?.Analytical_Memo ?? "",
+    };
+
+    const documentOp =
+      mode === "create"
+        ? this.prisma.analyzedDocument.create({
+            data: { documentId, ...fields, fileHash: scope.fileHash, caseStudyTypeId: scope.caseStudyTypeId },
+          })
+        : this.prisma.analyzedDocument.update({ where: { documentId }, data: fields });
 
     await this.prisma.$transaction([
-      this.prisma.analyzedDocument.create({
-        data: {
-          documentId,
-          policyName: meta.Policy_Name ?? "",
-          countryOrRegion: meta.Country_or_Region ?? "",
-          governanceLevel: String(meta.Governance_Level ?? ""),
-          policyYear: meta.Policy_Year ?? "",
-          issuingActor: meta.Issuing_Actor ?? "",
-          policyType: meta.Policy_Type ?? "",
-          sourceFile,
-          fileHash: scope.fileHash,
-          caseStudyTypeId: scope.caseStudyTypeId,
-          dateAnalysed,
-          policySummary: analysis.policy_summary ?? "",
-          refinementSummary: analysis.refinement_summary ?? "",
-          rqFocus: analysis.research_question_memo?.RQ_Focus ?? "",
-          analyticalMemo: analysis.research_question_memo?.Analytical_Memo ?? "",
-        },
-      }),
+      // Re-analysis: drop the old child rows before inserting the fresh ones.
+      ...(mode === "update"
+        ? [
+            this.prisma.rawExcerpt.deleteMany({ where: { documentId } }),
+            this.prisma.firstOrderConcept.deleteMany({ where: { documentId } }),
+            this.prisma.secondOrderTheme.deleteMany({ where: { documentId } }),
+          ]
+        : []),
+      documentOp,
       this.prisma.rawExcerpt.createMany({
         data: analysis.raw_data_extraction.map((r, i) => ({
           documentId,

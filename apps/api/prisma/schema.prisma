@@ -202,6 +202,23 @@ model UsageEvent {
   @@map("usage_events")
 }
 
+// Append-only log of failed document analyses, for the admin error-inspection
+// page. Recorded best-effort in the same catch block that turns a pipeline
+// failure into the HTTP error the uploader sees — so this is exactly what
+// went wrong, not a re-derivation of it. No FKs, for the same reason as
+// UsageEvent: a log must survive deletion of the case study it refers to.
+model AnalysisError {
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now())
+  fileName          String
+  message           String
+  rawOutput         String? // the model's raw text, when the failure was unparseable JSON
+  regionCaseStudyId String?
+
+  @@index([regionCaseStudyId])
+  @@map("analysis_errors")
+}
+
 // Singleton row holding the admin-selected model configuration for the pipeline
 // (replaces the env-driven MODEL_PROFILE / PIPELINE_MODE / MODEL_EFFORT).
 model AnalysisSetting {
